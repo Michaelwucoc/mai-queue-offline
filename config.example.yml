@@ -1,0 +1,58 @@
+# Koishi 配置文件示例
+# 舞萌DX排卡状态报告插件配置
+
+plugins:
+  mai-queue:
+    # 默认机台数量
+    defaultMachineCount: 5
+    # 平均每人游玩时间（分钟）
+    defaultPlayTimePerPerson: 15
+    # 每台机器可同时游玩人数
+    playersPerMachine: 2
+    # 机厅数据
+    arcades:
+      # 机厅ID（唯一标识）
+      wujiaochang:
+        config:
+          # 机厅名称
+          name: 上海五角场百联 ZX 造趣场 AKIBAGO
+          # 别名列表（支持多个别名）
+          aliases:
+            - wjc
+            - wujiaochang
+            - 五角场
+          # 机台数量
+          machineCount: 5
+          # 店铺通知
+          notice: 冬暖夏暖，记得备短袖。最近已改良通风！
+          # 群白名单（为空则允许所有群）
+          groupWhitelist:
+            - "123456789"
+            - "987654321"
+          # 自定义消息模板（可选，留空使用默认模板）
+          # messageTemplate: |
+          #   → OK！查到了！
+          #   - {name}
+          #   目前人数: {currentCount} 人
+          #   机台数量: {machineCount} 台
+          #   更新时间: {updateTime}
+          #   更新玩家: {updaterName}({updaterId})
+          #   店铺通知: {notice}
+          #   现在出勤大约需要 {waitTime} 分钟才能上机
+        # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
+      
+      # 另一个机厅示例
+      youfang:
+        config:
+          name: 悠方店
+          aliases:
+            - yf
+            - youfang
+            - 悠方
+          machineCount: 4
+          notice: 欢迎来到悠方店！
+          groupWhitelist: []  # 空列表表示所有群都可以使用
+        # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
+
+
+
