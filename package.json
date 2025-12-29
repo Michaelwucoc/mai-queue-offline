@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-mai-queue",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "舞萌DX排卡状态报告插件",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
@@ -23,8 +23,12 @@
   "peerDependencies": {
     "koishi": "^4.0.0"
   },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/js-yaml": "^4.0.0",
     "typescript": "^5.0.0",
     "koishi": "^4.0.0"
   }

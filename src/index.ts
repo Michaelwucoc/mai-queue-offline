@@ -1,4 +1,7 @@
 import { Context, Schema } from 'koishi'
+import * as fs from 'fs'
+import * as path from 'path'
+import yaml from 'js-yaml'
 
 export const name = 'mai-queue'
 
@@ -13,8 +16,10 @@ export interface ArcadeConfig {
   notice: string
   /** 允许使用的群列表（白名单） */
   groupWhitelist: string[]
-  /** 自定义消息模板（可选） */
-  messageTemplate?: string
+  /** 查询消息模板（可选） */
+  queryMessageTemplate?: string
+  /** 上报消息模板（可选） */
+  reportMessageTemplate?: string
 }
 
 export interface ArcadeStatus {
@@ -48,7 +53,32 @@ export const Config: Schema<{
       machineCount: Schema.number().default(5).description('机台数量'),
       notice: Schema.string().default('').description('店铺通知内容（可选，例如：冬暖夏暖，记得备短袖）'),
       groupWhitelist: Schema.array(Schema.string()).default([]).description('群白名单（为空则允许所有群使用，例如：["123456789", "987654321"]）'),
-      messageTemplate: Schema.string().default('').description('自定义消息模板（留空使用默认模板。可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {notice}, {waitTime}, {nextPlayTime}）'),
+      queryMessageTemplate: Schema.string().role('textarea').default(`→ OK！查到了！
+
+- {name}
+目前人数: {currentCount} 人 ({minutesAgo} 分钟前)
+机台数量: {machineCount} 台
+更新时间: {updateTime}
+更新玩家: {updaterInfo}
+店铺通知: 
+　　{notice}
+现在出勤大约需要 {waitTime} 分钟才能上机
+
+若是刚刚下机，
+从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('查询消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}）'),
+      reportMessageTemplate: Schema.string().role('textarea').default(`→ 已更新！
+
+- {name}
+目前人数: {currentCount} 人 ({minutesAgo} 分钟前)
+机台数量: {machineCount} 台
+更新时间: {updateTime}
+更新玩家: {updaterInfo}
+店铺通知: 
+　　{notice}
+现在出勤大约需要 {waitTime} 分钟才能上机
+
+若是刚刚下机，
+从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('上报消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}）'),
     }).description('机厅配置'),
   })).description('机厅数据（键名为机厅ID，例如：wujiaochang）'),
   defaultMachineCount: Schema.number().default(5).description('默认机台数量（新机厅的默认值）'),
@@ -90,13 +120,92 @@ export function apply(ctx: Context, config: any) {
 
   let aliasMap = rebuildAliasMap()
 
+  // 获取数据文件路径
+  function getDataFilePath(): string {
+    // 使用 Koishi 的数据目录
+    const baseDir = ctx.baseDir || process.cwd()
+    const dataDir = path.join(baseDir, 'data')
+    // 确保数据目录存在
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true })
+    }
+    return path.join(dataDir, 'mai-queue-status.yml')
+  }
+
+  // 保存状态数据到 yml 文件
+  async function saveStatusToFile() {
+    try {
+      const dataFilePath = getDataFilePath()
+      const statusData: Record<string, ArcadeStatus> = {}
+      
+      // 收集所有机厅的状态数据
+      for (const [id, arcade] of Object.entries(arcades)) {
+        statusData[id] = arcade.status
+      }
+      
+      // 转换为 yaml 格式
+      const yamlContent = yaml.dump(statusData, {
+        indent: 2,
+        lineWidth: -1,
+        quotingType: '"',
+        forceQuotes: false,
+      })
+      
+      // 写入文件
+      fs.writeFileSync(dataFilePath, yamlContent, 'utf8')
+      ctx.logger('mai-queue').debug('状态数据已保存到文件')
+    } catch (error) {
+      ctx.logger('mai-queue').error('保存状态数据失败:', error)
+    }
+  }
+
+  // 从 yml 文件加载状态数据
+  function loadStatusFromFile() {
+    try {
+      const dataFilePath = getDataFilePath()
+      if (!fs.existsSync(dataFilePath)) {
+        ctx.logger('mai-queue').debug('状态数据文件不存在，使用默认值')
+        return
+      }
+      
+      // 读取文件内容
+      const fileContent = fs.readFileSync(dataFilePath, 'utf8')
+      const statusData = yaml.load(fileContent) as Record<string, ArcadeStatus> | null
+      
+      if (!statusData || typeof statusData !== 'object') {
+        ctx.logger('mai-queue').warn('状态数据文件格式错误，使用默认值')
+        return
+      }
+      
+      // 更新内存中的状态数据（优先使用数据文件中的数据）
+      for (const [id, status] of Object.entries(statusData)) {
+        if (arcades[id] && status) {
+          arcades[id].status = {
+            currentCount: typeof status.currentCount === 'number' ? status.currentCount : 0,
+            updateTime: status.updateTime || '',
+            updaterName: status.updaterName || '',
+            updaterId: status.updaterId || '',
+            lastPlayTime: status.lastPlayTime,
+          }
+        }
+      }
+      
+      ctx.logger('mai-queue').debug('状态数据已从文件加载')
+    } catch (error) {
+      ctx.logger('mai-queue').error('加载状态数据失败:', error)
+    }
+  }
+
   // 更新状态（内部使用）
   // 注意：机厅配置（名称、别名、机台数量等）需要通过配置文件管理，修改后需重启插件
-  // 状态数据（当前人数、更新时间等）仅保存在内存中，重启后会丢失
+  // 状态数据（当前人数、更新时间等）会持久化保存到 yml 文件
   async function updateConfig() {
-    // 状态数据仅保存在内存中（当前人数、更新时间等）
-    // 配置数据（机厅信息）通过配置文件管理，重启插件时会重新加载
+    // 保存状态数据到文件
+    await saveStatusToFile()
   }
+
+  // 初始化时加载状态数据
+  loadStatusFromFile()
 
   // 检查群是否在白名单中
   function checkGroupWhitelist(arcadeId: string, groupId: string): boolean {
@@ -149,8 +258,8 @@ export function apply(ctx: Context, config: any) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
   }
 
-  // 生成默认消息模板
-  function generateDefaultMessage(arcadeId: string, arcade: ArcadeData): string {
+  // 生成查询消息（默认模板）
+  function generateDefaultQueryMessage(arcadeId: string, arcade: ArcadeData): string {
     const { config, status } = arcade
     const waitTime = calculateWaitTime(arcade)
     const nextPlayTime = calculateNextPlayTime(arcade)
@@ -169,7 +278,7 @@ export function apply(ctx: Context, config: any) {
       : '未知'
 
     let message = `→ OK！查到了！\n\n`
-    message += `- ${config.name} //店铺名字\n`
+    message += `- ${config.name}\n`
     message += `目前人数: ${status.currentCount} 人`
     
     if (status.updateTime) {
@@ -192,29 +301,125 @@ export function apply(ctx: Context, config: any) {
     return message
   }
 
-  // 生成消息（支持自定义模板）
-  function generateMessage(arcadeId: string, arcade: ArcadeData): string {
-    if (arcade.config.messageTemplate) {
-      // 简单的模板替换
-      const { config, status } = arcade
-      const waitTime = calculateWaitTime(arcade)
-      const nextPlayTime = calculateNextPlayTime(arcade)
-      
-      let message = arcade.config.messageTemplate
-      const updateTimeStr = status.updateTime ? formatDateTime(new Date(status.updateTime)) : '未知'
-      message = message.replace(/\{name\}/g, config.name)
-      message = message.replace(/\{currentCount\}/g, status.currentCount.toString())
-      message = message.replace(/\{machineCount\}/g, (config.machineCount || defaultMachineCount).toString())
-      message = message.replace(/\{updateTime\}/g, updateTimeStr)
-      message = message.replace(/\{updaterName\}/g, status.updaterName || '未知')
-      message = message.replace(/\{updaterId\}/g, status.updaterId || '未知')
-      message = message.replace(/\{notice\}/g, config.notice || '')
-      message = message.replace(/\{waitTime\}/g, waitTime.toString())
-      message = message.replace(/\{nextPlayTime\}/g, nextPlayTime?.toString() || '未知')
-      
-      return message
+  // 生成上报消息（默认模板）
+  function generateDefaultReportMessage(arcadeId: string, arcade: ArcadeData): string {
+    const { config, status } = arcade
+    const waitTime = calculateWaitTime(arcade)
+    const nextPlayTime = calculateNextPlayTime(arcade)
+    
+    let updateTimeStr = '未知'
+    let minutesAgo = 0
+    if (status.updateTime) {
+      const updateTime = new Date(status.updateTime)
+      const now = new Date()
+      updateTimeStr = formatDateTime(updateTime)
+      minutesAgo = Math.floor((now.getTime() - updateTime.getTime()) / 60000)
     }
-    return generateDefaultMessage(arcadeId, arcade)
+    
+    const updaterInfo = status.updaterName 
+      ? `${status.updaterName}(${status.updaterId})`
+      : '未知'
+
+    let message = `→ 已更新！\n\n`
+    message += `- ${config.name}\n`
+    message += `目前人数: ${status.currentCount} 人`
+    
+    if (status.updateTime) {
+      message += ` (${minutesAgo} 分钟前)`
+    }
+    message += `\n机台数量: ${config.machineCount || defaultMachineCount} 台\n`
+    message += `更新时间: ${updateTimeStr}\n`
+    message += `更新玩家: ${updaterInfo}\n`
+    
+    if (config.notice) {
+      message += `店铺通知: \n　　${config.notice}\n`
+    }
+    
+    message += `\n现在出勤大约需要 ${waitTime} 分钟才能上机`
+    
+    if (nextPlayTime !== null) {
+      message += `\n\n若是刚刚下机，\n从上次上机到下次大约需要 ${nextPlayTime} 分钟`
+    }
+    
+    return message
+  }
+
+  // 替换模板变量
+  function replaceTemplateVariables(template: string, arcade: ArcadeData): string {
+    const { config, status } = arcade
+    const waitTime = calculateWaitTime(arcade)
+    const nextPlayTime = calculateNextPlayTime(arcade)
+    
+    let updateTimeStr = '未知'
+    let minutesAgo = 0
+    if (status.updateTime) {
+      const updateTime = new Date(status.updateTime)
+      const now = new Date()
+      updateTimeStr = formatDateTime(updateTime)
+      minutesAgo = Math.floor((now.getTime() - updateTime.getTime()) / 60000)
+    }
+    
+    const updaterInfo = status.updaterName 
+      ? `${status.updaterName}(${status.updaterId})`
+      : '未知'
+    
+    let message = template
+    message = message.replace(/\{name\}/g, config.name)
+    message = message.replace(/\{currentCount\}/g, status.currentCount.toString())
+    message = message.replace(/\{machineCount\}/g, (config.machineCount || defaultMachineCount).toString())
+    message = message.replace(/\{updateTime\}/g, updateTimeStr)
+    message = message.replace(/\{updaterName\}/g, status.updaterName || '未知')
+    message = message.replace(/\{updaterId\}/g, status.updaterId || '未知')
+    message = message.replace(/\{updaterInfo\}/g, updaterInfo)
+    message = message.replace(/\{notice\}/g, config.notice || '')
+    message = message.replace(/\{waitTime\}/g, waitTime.toString())
+    message = message.replace(/\{nextPlayTime\}/g, nextPlayTime?.toString() || '未知')
+    message = message.replace(/\{minutesAgo\}/g, status.updateTime ? minutesAgo.toString() : '')
+    
+    // 处理条件显示：如果没有更新时间，移除 ( 分钟前) 部分
+    if (!status.updateTime) {
+      message = message.replace(/ \(.*分钟前\)/g, '')
+      message = message.replace(/ \( 分钟前\)/g, '')
+      message = message.replace(/ \(分钟前\)/g, '')
+    }
+    
+    // 处理条件显示：如果nextPlayTime为null，移除包含下机信息的行
+    if (nextPlayTime === null) {
+      // 匹配包含"若是刚刚下机"的行，可能跨多行
+      message = message.replace(/\n\n若是刚刚下机，\n从上次上机到下次大约需要 [0-9]+ 分钟/g, '')
+      message = message.replace(/\n若是刚刚下机，\n从上次上机到下次大约需要 [0-9]+ 分钟/g, '')
+      message = message.replace(/\n\n若是刚刚下机，\n从上次上机到下次大约需要 未知 分钟/g, '')
+      message = message.replace(/\n若是刚刚下机，\n从上次上机到下次大约需要 未知 分钟/g, '')
+      // 单行匹配
+      message = message.replace(/\n若是刚刚下机，从上次上机到下次大约需要 [0-9]+ 分钟/g, '')
+      message = message.replace(/\n若是刚刚下机，从上次上机到下次大约需要 未知 分钟/g, '')
+    }
+    
+    // 处理条件显示：如果没有店铺通知，移除店铺通知相关的行
+    if (!config.notice) {
+      message = message.replace(/店铺通知: \n　　\n/g, '')
+      message = message.replace(/店铺通知: \n\n/g, '')
+      message = message.replace(/店铺通知: \n/g, '')
+      message = message.replace(/店铺通知: \n　　/g, '')
+    }
+    
+    return message
+  }
+
+  // 生成查询消息（支持自定义模板）
+  function generateQueryMessage(arcadeId: string, arcade: ArcadeData): string {
+    if (arcade.config.queryMessageTemplate) {
+      return replaceTemplateVariables(arcade.config.queryMessageTemplate, arcade)
+    }
+    return generateDefaultQueryMessage(arcadeId, arcade)
+  }
+
+  // 生成上报消息（支持自定义模板）
+  function generateReportMessage(arcadeId: string, arcade: ArcadeData): string {
+    if (arcade.config.reportMessageTemplate) {
+      return replaceTemplateVariables(arcade.config.reportMessageTemplate, arcade)
+    }
+    return generateDefaultReportMessage(arcadeId, arcade)
   }
 
   // 解析人数上报命令
@@ -282,7 +487,8 @@ export function apply(ctx: Context, config: any) {
         const arcade = arcades[arcadeId] as ArcadeData | undefined
         if (arcade) {
           // 返回查询结果
-          return generateMessage(arcadeId, arcade)
+          await session.send(generateQueryMessage(arcadeId, arcade))
+          return
         }
       }
       // 如果匹配了查询格式但找不到机厅，继续处理
@@ -310,6 +516,7 @@ export function apply(ctx: Context, config: any) {
       }
 
       // 更新人数
+      const oldCount = arcade.status.currentCount
       let newCount = arcade.status.currentCount
       if (reportParsed.operation === 'set') {
         newCount = reportParsed.value
@@ -324,11 +531,17 @@ export function apply(ctx: Context, config: any) {
       arcade.status.updaterName = session.event.user?.name || session.event.user?.id || ''
       arcade.status.updaterId = session.event.user?.id || ''
 
+      // 如果人数减少，自动设置lastPlayTime（表示刚下机）
+      if (newCount < oldCount) {
+        arcade.status.lastPlayTime = new Date().toISOString()
+      }
+
       // 状态数据仅保存在内存中
       await updateConfig()
 
       // 返回更新后的状态
-      return generateMessage(arcadeId, arcade)
+      await session.send(generateReportMessage(arcadeId, arcade))
+      return
     }
 
     // 都不匹配，继续处理
@@ -338,35 +551,7 @@ export function apply(ctx: Context, config: any) {
   // 注意：机厅配置（名称、别名、机台数量、店铺通知、白名单等）需要通过配置文件管理
   // 修改配置后需要重启插件才能生效
   // 以下命令仅用于运行时状态查询和上报，不用于修改配置
-
-  // 标记刚下机（管理员命令）
-  ctx.command('arcade.finish <alias>', '标记刚下机')
-    .action(async ({ session }, alias) => {
-      if (!alias) {
-        return '请输入机厅别名！'
-      }
-
-      const arcadeId = getArcadeId(alias)
-      if (!arcadeId) {
-        return `未找到别名 "${alias}" 对应的机厅！`
-      }
-
-      // 检查群白名单
-      if (session?.event.channel && !checkGroupWhitelist(arcadeId, session.event.channel.id)) {
-        return '此群不在该机厅的白名单中，无法使用此功能！'
-      }
-
-      const arcade = arcades[arcadeId] as ArcadeData | undefined
-      if (!arcade) {
-        return '机厅数据不存在！'
-      }
-
-      arcade.status.lastPlayTime = new Date().toISOString()
-      // 状态数据仅保存在内存中
-      await updateConfig()
-
-      return generateMessage(arcadeId, arcade)
-    })
+  // 注意：当人数减少时，会自动设置lastPlayTime（表示刚下机），查询和上报时会自动显示下机信息
 
   // 重置所有机厅人数为0
   async function resetAllArcadesCount() {

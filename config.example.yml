@@ -30,8 +30,10 @@ plugins:
             - "123456789"
             - "987654321"
           # 自定义消息模板（可选，留空使用默认模板）
+          # 可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {notice}, {waitTime}, {nextPlayTime}
           # messageTemplate: |
           #   → OK！查到了！
+          #   
           #   - {name}
           #   目前人数: {currentCount} 人
           #   机台数量: {machineCount} 台
@@ -39,6 +41,9 @@ plugins:
           #   更新玩家: {updaterName}({updaterId})
           #   店铺通知: {notice}
           #   现在出勤大约需要 {waitTime} 分钟才能上机
+          #   
+          #   若是刚刚下机，
+          #   从上次上机到下次大约需要 {nextPlayTime} 分钟
         # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
       
       # 另一个机厅示例
