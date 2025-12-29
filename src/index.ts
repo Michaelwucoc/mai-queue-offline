@@ -1,7 +1,7 @@
 import { Context, Schema } from 'koishi'
 import * as fs from 'fs'
 import * as path from 'path'
-import yaml from 'js-yaml'
+import * as yaml from 'yaml'
 
 export const name = 'mai-queue'
 
@@ -144,11 +144,9 @@ export function apply(ctx: Context, config: any) {
       }
       
       // 转换为 yaml 格式
-      const yamlContent = yaml.dump(statusData, {
+      const yamlContent = yaml.stringify(statusData, {
         indent: 2,
-        lineWidth: -1,
-        quotingType: '"',
-        forceQuotes: false,
+        lineWidth: 0,
       })
       
       // 写入文件
@@ -170,7 +168,7 @@ export function apply(ctx: Context, config: any) {
       
       // 读取文件内容
       const fileContent = fs.readFileSync(dataFilePath, 'utf8')
-      const statusData = yaml.load(fileContent) as Record<string, ArcadeStatus> | null
+      const statusData = yaml.parse(fileContent) as Record<string, ArcadeStatus> | null
       
       if (!statusData || typeof statusData !== 'object') {
         ctx.logger('mai-queue').warn('状态数据文件格式错误，使用默认值')
@@ -560,17 +558,18 @@ export function apply(ctx: Context, config: any) {
       const arcadeData = arcade as ArcadeData
       arcadeData.status.currentCount = 0
       arcadeData.status.updateTime = resetTime
-      arcadeData.status.updaterName = '系统'
-      arcadeData.status.updaterId = 'system'
+      arcadeData.status.updaterName = 'Bot（系统自动归零）'
+      arcadeData.status.updaterId = 'bot-auto-reset'
       arcadeData.status.lastPlayTime = undefined // 清除上次上机时间
     }
     await updateConfig()
+    ctx.logger('mai-queue').info('所有机厅人数已由Bot自动归零')
   }
 
   // 存储当前定时器ID，以便在插件卸载时清理
   let resetTimerId: NodeJS.Timeout | null = null
 
-  // 设置定时任务：每天凌晨12点重置所有机厅人数
+  // 设置定时任务：每天凌晨12点由Bot自动重置所有机厅人数
   // 计算到下一个凌晨12点的时间
   function scheduleMidnightReset() {
     const now = new Date()
