@@ -69,7 +69,7 @@ export const Config: Schema<{
       reportMessageTemplate: Schema.string().role('textarea').default(`→ 已更新！
 
 - {name}
-目前人数: {currentCount} 人 ({minutesAgo} 分钟前)
+目前人数: {currentCount} 人 {diff} ({minutesAgo} 分钟前)
 机台数量: {machineCount} 台
 更新时间: {updateTime}
 更新玩家: {updaterInfo}
@@ -78,7 +78,7 @@ export const Config: Schema<{
 现在出勤大约需要 {waitTime} 分钟才能上机
 
 若是刚刚下机，
-从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('上报消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}）'),
+从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('上报消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {diff}）'),
     }).description('机厅配置'),
   })).description('机厅数据（键名为机厅ID，例如：wujiaochang）'),
   defaultMachineCount: Schema.number().default(5).description('默认机台数量（新机厅的默认值）'),
@@ -343,7 +343,7 @@ export function apply(ctx: Context, config: any) {
   }
 
   // 替换模板变量
-  function replaceTemplateVariables(template: string, arcade: ArcadeData): string {
+  function replaceTemplateVariables(template: string, arcade: ArcadeData, diff?: number): string {
     const { config, status } = arcade
     const waitTime = calculateWaitTime(arcade)
     const nextPlayTime = calculateNextPlayTime(arcade)
@@ -361,6 +361,12 @@ export function apply(ctx: Context, config: any) {
       ? `${status.updaterName}(${status.updaterId})`
       : '未知'
     
+    // 格式化差异值
+    let diffStr = ''
+    if (diff !== undefined && diff !== 0) {
+      diffStr = diff > 0 ? `+${diff}` : `${diff}`
+    }
+    
     let message = template
     message = message.replace(/\{name\}/g, config.name)
     message = message.replace(/\{currentCount\}/g, status.currentCount.toString())
@@ -373,6 +379,7 @@ export function apply(ctx: Context, config: any) {
     message = message.replace(/\{waitTime\}/g, waitTime.toString())
     message = message.replace(/\{nextPlayTime\}/g, nextPlayTime?.toString() || '未知')
     message = message.replace(/\{minutesAgo\}/g, status.updateTime ? minutesAgo.toString() : '')
+    message = message.replace(/\{diff\}/g, diffStr)
     
     // 处理条件显示：如果没有更新时间，移除 ( 分钟前) 部分
     if (!status.updateTime) {
@@ -413,9 +420,9 @@ export function apply(ctx: Context, config: any) {
   }
 
   // 生成上报消息（支持自定义模板）
-  function generateReportMessage(arcadeId: string, arcade: ArcadeData): string {
+  function generateReportMessage(arcadeId: string, arcade: ArcadeData, diff?: number): string {
     if (arcade.config.reportMessageTemplate) {
-      return replaceTemplateVariables(arcade.config.reportMessageTemplate, arcade)
+      return replaceTemplateVariables(arcade.config.reportMessageTemplate, arcade, diff)
     }
     return generateDefaultReportMessage(arcadeId, arcade)
   }
@@ -516,11 +523,16 @@ export function apply(ctx: Context, config: any) {
       // 更新人数
       const oldCount = arcade.status.currentCount
       let newCount = arcade.status.currentCount
+      let diff = 0
+      
       if (reportParsed.operation === 'set') {
         newCount = reportParsed.value
+        diff = newCount - oldCount // 计算差异（例如：原来是5，现在设为3，diff = -2）
       } else if (reportParsed.operation === 'add') {
+        diff = reportParsed.value
         newCount += reportParsed.value
       } else if (reportParsed.operation === 'subtract') {
+        diff = -reportParsed.value
         newCount = Math.max(0, newCount - reportParsed.value)
       }
 
@@ -537,8 +549,8 @@ export function apply(ctx: Context, config: any) {
       // 状态数据仅保存在内存中
       await updateConfig()
 
-      // 返回更新后的状态
-      await session.send(generateReportMessage(arcadeId, arcade))
+      // 返回更新后的状态（传递差异值）
+      await session.send(generateReportMessage(arcadeId, arcade, diff))
       return
     }
 
