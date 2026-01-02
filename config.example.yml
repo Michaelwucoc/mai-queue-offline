@@ -9,6 +9,9 @@ plugins:
     defaultPlayTimePerPerson: 15
     # 每台机器可同时游玩人数
     playersPerMachine: 2
+    # TurboAPI授权密钥（格式：BotKey <key>，留空则不使用TurboAPI）
+    # 例如：979c5f40-130f-4246-94bd-6b2973040b5e
+    turboApiKey: ""
     # 机厅数据
     arcades:
       # 机厅ID（唯一标识）
@@ -29,9 +32,19 @@ plugins:
           groupWhitelist:
             - "123456789"
             - "987654321"
-          # 自定义消息模板（可选，留空使用默认模板）
-          # 可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {notice}, {waitTime}, {nextPlayTime}
-          # messageTemplate: |
+          # 是否启用Turbo兼容（需要配置turboApiKey和turboName）
+          enableTurbo: false
+          # Turbo机厅名称（启用Turbo时必填，需要与Turbo系统中的机厅名称一致）
+          turboName: ""
+          # 自定义查询消息模板（可选，留空使用默认模板）
+          # 可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}
+          # Turbo变量（仅当enableTurbo为true时可用）：
+          #   - {thirtyMinutesPlayer}, {oneHourPlayer}, {twoHoursPlayer} - 玩家数
+          #   - {thirtyMinutesPlayCount}, {oneHourPlayCount}, {twoHoursPlayCount} - 游玩次数
+          #   - {recentPlayername}, {recentPlayername_thirty} - 玩家列表（每行前面两个空格）
+          #   - {arcadePlayCount}, {arcadeRequested}, {arcadeCachedRequest}, {arcadeFixedRequest} - 机厅统计数据
+          #   - {arcadeCachedHitRate} - 缓存命中率（自动转换为百分比，如：64.92%）
+          # queryMessageTemplate: |
           #   → OK！查到了！
           #   
           #   - {name}
@@ -57,6 +70,54 @@ plugins:
           machineCount: 4
           notice: 欢迎来到悠方店！
           groupWhitelist: []  # 空列表表示所有群都可以使用
+          enableTurbo: false
+          turboName: ""
+        # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
+      
+      # Turbo机厅示例
+      liehuo:
+        config:
+          name: 上海街机烈火
+          aliases:
+            - lh
+            - liehuo
+            - 烈火
+          machineCount: 8
+          notice: 欢迎来到烈火！
+          groupWhitelist: []
+          # 启用Turbo兼容
+          enableTurbo: true
+          # Turbo系统中的机厅名称（必须与Turbo系统中的名称完全一致）
+          turboName: "上海街机烈火"
+          # 自定义模板示例（使用Turbo变量）
+          queryMessageTemplate: |
+            → OK！查到了！
+            
+            - {name}
+            目前人数: {currentCount} 人 ({minutesAgo} 分钟前)
+            机台数量: {machineCount} 台
+            更新时间: {updateTime}
+            更新玩家: {updaterInfo}
+            
+            [Turbo数据]
+            30分钟玩家数: {thirtyMinutesPlayer}
+            1小时玩家数: {oneHourPlayer}
+            2小时玩家数: {twoHoursPlayer}
+            30分钟游玩次数: {thirtyMinutesPlayCount}
+            1小时游玩次数: {oneHourPlayCount}
+            2小时游玩次数: {twoHoursPlayCount}
+            
+            机厅游玩次数: {arcadePlayCount}
+            机厅请求数: {arcadeRequested}
+            缓存请求数: {arcadeCachedRequest}
+            固定请求数: {arcadeFixedRequest}
+            缓存命中率: {arcadeCachedHitRate}
+            
+            最近玩家:
+            {recentPlayername}
+            
+            最近30分钟玩家:
+            {recentPlayername_thirty}
         # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
 
 

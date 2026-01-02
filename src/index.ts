@@ -20,6 +20,10 @@ export interface ArcadeConfig {
   queryMessageTemplate?: string
   /** 上报消息模板（可选） */
   reportMessageTemplate?: string
+  /** 是否启用Turbo兼容 */
+  enableTurbo?: boolean
+  /** Turbo机厅名称（启用Turbo时必填） */
+  turboName?: string
 }
 
 export interface ArcadeStatus {
@@ -40,11 +44,47 @@ export interface ArcadeData {
   status: ArcadeStatus
 }
 
+export interface TurboPlayerInfo {
+  userIdHash: string
+  maimaiName: string
+  turboName: string
+  isTurboAdmin: boolean
+  playdate: string
+}
+
+export interface TurboArcadeInfoResponse {
+  arcadeInfo: {
+    arcadeName: string
+    arcadeType: string
+    arcadePlayCount: number
+    arcadeRequested: number
+    arcadeCachedRequest: number
+    arcadeFixedRequest: number
+    arcadeCachedHitRate: number
+    singleArcadeInfo: Array<{
+      singleName: string
+      isEnableCustomName: boolean
+      isEnableCustomAvatar: boolean
+      isEnableTurboTicket: boolean
+      arcadeEnableSetting: any[]
+    }>
+  }
+  thirtyMinutesPlayer: number
+  oneHourPlayer: number
+  twoHoursPlayer: number
+  thirtyMinutesPlayCount: number
+  oneHourPlayCount: number
+  twoHoursPlayCount: number
+  playerList: TurboPlayerInfo[]
+  thirtyMinutesPlayerList: TurboPlayerInfo[]
+}
+
 export const Config: Schema<{
   arcades: Record<string, { config: ArcadeConfig }>
   defaultMachineCount: number
   defaultPlayTimePerPerson: number
   playersPerMachine: number
+  turboApiKey: string
 }> = Schema.object({
   arcades: Schema.dict(Schema.object({
     config: Schema.object({
@@ -79,15 +119,18 @@ export const Config: Schema<{
 
 若是刚刚下机，
 从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('上报消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {diff}）'),
+      enableTurbo: Schema.boolean().default(false).description('是否启用Turbo兼容'),
+      turboName: Schema.string().default('').description('Turbo机厅名称（启用Turbo时必填）'),
     }).description('机厅配置'),
   })).description('机厅数据（键名为机厅ID，例如：wujiaochang）'),
   defaultMachineCount: Schema.number().default(5).description('默认机台数量（新机厅的默认值）'),
   defaultPlayTimePerPerson: Schema.number().default(15).description('平均每人游玩时间（分钟，用于计算排队时间）'),
   playersPerMachine: Schema.number().default(2).description('每台机器可同时游玩人数'),
+  turboApiKey: Schema.string().default('').description('TurboAPI授权密钥（格式：BotKey <key>，留空则不使用TurboAPI）'),
 }).description('舞萌DX排卡状态报告插件配置')
 
 export function apply(ctx: Context, config: any) {
-  let { arcades: arcadesConfig, defaultMachineCount, defaultPlayTimePerPerson, playersPerMachine } = config
+  let { arcades: arcadesConfig, defaultMachineCount, defaultPlayTimePerPerson, playersPerMachine, turboApiKey } = config
 
   // 将配置转换为运行时数据结构（添加status字段）
   const arcades: Record<string, ArcadeData> = {}
@@ -204,6 +247,37 @@ export function apply(ctx: Context, config: any) {
 
   // 初始化时加载状态数据
   loadStatusFromFile()
+
+  // TurboAPI请求函数
+  async function fetchTurboArcadeInfo(turboName: string): Promise<TurboArcadeInfoResponse | null> {
+    if (!turboApiKey || !turboName) {
+      return null
+    }
+
+    try {
+      const url = `https://api.sys-allnet.com/web/arcadeInfoDetail?arcadeName=${encodeURIComponent(turboName)}`
+      const authHeader = turboApiKey ? `BotKey ${turboApiKey}` : ''
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+        },
+      })
+
+      if (!response.ok) {
+        ctx.logger('mai-queue').warn(`TurboAPI请求失败: ${response.status} ${response.statusText}`)
+        return null
+      }
+
+      const data = await response.json() as TurboArcadeInfoResponse
+      return data
+    } catch (error) {
+      ctx.logger('mai-queue').error('TurboAPI请求异常:', error)
+      return null
+    }
+  }
 
   // 检查群是否在白名单中
   function checkGroupWhitelist(arcadeId: string, groupId: string): boolean {
@@ -342,8 +416,16 @@ export function apply(ctx: Context, config: any) {
     return message
   }
 
+  // 格式化玩家列表（每行前面两个空格）
+  function formatPlayerList(players: TurboPlayerInfo[]): string {
+    if (!players || players.length === 0) {
+      return ''
+    }
+    return players.map(player => `  ${player.maimaiName}`).join('\n')
+  }
+
   // 替换模板变量
-  function replaceTemplateVariables(template: string, arcade: ArcadeData, diff?: number): string {
+  function replaceTemplateVariables(template: string, arcade: ArcadeData, diff?: number, turboData?: TurboArcadeInfoResponse | null): string {
     const { config, status } = arcade
     const waitTime = calculateWaitTime(arcade)
     const nextPlayTime = calculateNextPlayTime(arcade)
@@ -381,6 +463,47 @@ export function apply(ctx: Context, config: any) {
     message = message.replace(/\{minutesAgo\}/g, status.updateTime ? minutesAgo.toString() : '')
     message = message.replace(/\{diff\}/g, diffStr)
     
+    // Turbo变量替换
+    if (turboData) {
+      message = message.replace(/\{thirtyMinutesPlayer\}/g, turboData.thirtyMinutesPlayer?.toString() || '0')
+      message = message.replace(/\{oneHourPlayer\}/g, turboData.oneHourPlayer?.toString() || '0')
+      message = message.replace(/\{twoHoursPlayer\}/g, turboData.twoHoursPlayer?.toString() || '0')
+      message = message.replace(/\{thirtyMinutesPlayCount\}/g, turboData.thirtyMinutesPlayCount?.toString() || '0')
+      message = message.replace(/\{oneHourPlayCount\}/g, turboData.oneHourPlayCount?.toString() || '0')
+      message = message.replace(/\{twoHoursPlayCount\}/g, turboData.twoHoursPlayCount?.toString() || '0')
+      message = message.replace(/\{recentPlayername\}/g, formatPlayerList(turboData.playerList || []))
+      message = message.replace(/\{recentPlayername_thirty\}/g, formatPlayerList(turboData.thirtyMinutesPlayerList || []))
+      
+      // 机厅信息变量
+      const arcadeInfo = turboData.arcadeInfo
+      message = message.replace(/\{arcadePlayCount\}/g, arcadeInfo?.arcadePlayCount?.toString() || '0')
+      message = message.replace(/\{arcadeRequested\}/g, arcadeInfo?.arcadeRequested?.toString() || '0')
+      message = message.replace(/\{arcadeCachedRequest\}/g, arcadeInfo?.arcadeCachedRequest?.toString() || '0')
+      message = message.replace(/\{arcadeFixedRequest\}/g, arcadeInfo?.arcadeFixedRequest?.toString() || '0')
+      
+      // 缓存命中率转换为百分比（保留2位小数）
+      const hitRate = arcadeInfo?.arcadeCachedHitRate
+      const hitRatePercent = hitRate !== undefined && hitRate !== null 
+        ? `${(hitRate * 100).toFixed(2)}%` 
+        : '0%'
+      message = message.replace(/\{arcadeCachedHitRate\}/g, hitRatePercent)
+    } else {
+      // 如果没有Turbo数据，替换为默认值
+      message = message.replace(/\{thirtyMinutesPlayer\}/g, '0')
+      message = message.replace(/\{oneHourPlayer\}/g, '0')
+      message = message.replace(/\{twoHoursPlayer\}/g, '0')
+      message = message.replace(/\{thirtyMinutesPlayCount\}/g, '0')
+      message = message.replace(/\{oneHourPlayCount\}/g, '0')
+      message = message.replace(/\{twoHoursPlayCount\}/g, '0')
+      message = message.replace(/\{recentPlayername\}/g, '')
+      message = message.replace(/\{recentPlayername_thirty\}/g, '')
+      message = message.replace(/\{arcadePlayCount\}/g, '0')
+      message = message.replace(/\{arcadeRequested\}/g, '0')
+      message = message.replace(/\{arcadeCachedRequest\}/g, '0')
+      message = message.replace(/\{arcadeFixedRequest\}/g, '0')
+      message = message.replace(/\{arcadeCachedHitRate\}/g, '0%')
+    }
+    
     // 处理条件显示：如果没有更新时间，移除 ( 分钟前) 部分
     if (!status.updateTime) {
       message = message.replace(/ \(.*分钟前\)/g, '')
@@ -412,17 +535,31 @@ export function apply(ctx: Context, config: any) {
   }
 
   // 生成查询消息（支持自定义模板）
-  function generateQueryMessage(arcadeId: string, arcade: ArcadeData): string {
+  async function generateQueryMessage(arcadeId: string, arcade: ArcadeData): Promise<string> {
+    let turboData: TurboArcadeInfoResponse | null = null
+    
+    // 如果是Turbo机厅，获取Turbo数据
+    if (arcade.config.enableTurbo && arcade.config.turboName) {
+      turboData = await fetchTurboArcadeInfo(arcade.config.turboName)
+    }
+    
     if (arcade.config.queryMessageTemplate) {
-      return replaceTemplateVariables(arcade.config.queryMessageTemplate, arcade)
+      return replaceTemplateVariables(arcade.config.queryMessageTemplate, arcade, undefined, turboData)
     }
     return generateDefaultQueryMessage(arcadeId, arcade)
   }
 
   // 生成上报消息（支持自定义模板）
-  function generateReportMessage(arcadeId: string, arcade: ArcadeData, diff?: number): string {
+  async function generateReportMessage(arcadeId: string, arcade: ArcadeData, diff?: number): Promise<string> {
+    let turboData: TurboArcadeInfoResponse | null = null
+    
+    // 如果是Turbo机厅，获取Turbo数据
+    if (arcade.config.enableTurbo && arcade.config.turboName) {
+      turboData = await fetchTurboArcadeInfo(arcade.config.turboName)
+    }
+    
     if (arcade.config.reportMessageTemplate) {
-      return replaceTemplateVariables(arcade.config.reportMessageTemplate, arcade, diff)
+      return replaceTemplateVariables(arcade.config.reportMessageTemplate, arcade, diff, turboData)
     }
     return generateDefaultReportMessage(arcadeId, arcade)
   }
@@ -492,7 +629,7 @@ export function apply(ctx: Context, config: any) {
         const arcade = arcades[arcadeId] as ArcadeData | undefined
         if (arcade) {
           // 返回查询结果
-          await session.send(generateQueryMessage(arcadeId, arcade))
+          await session.send(await generateQueryMessage(arcadeId, arcade))
           return
         }
       }
@@ -550,13 +687,14 @@ export function apply(ctx: Context, config: any) {
       await updateConfig()
 
       // 返回更新后的状态（传递差异值）
-      await session.send(generateReportMessage(arcadeId, arcade, diff))
+      await session.send(await generateReportMessage(arcadeId, arcade, diff))
       return
     }
 
     // 都不匹配，继续处理
     return next()
   })
+
 
   // 注意：机厅配置（名称、别名、机台数量、店铺通知、白名单等）需要通过配置文件管理
   // 修改配置后需要重启插件才能生效
