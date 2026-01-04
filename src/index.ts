@@ -682,6 +682,12 @@ export function apply(ctx: Context, config: any) {
       if (newCount < oldCount) {
         arcade.status.lastPlayTime = new Date().toISOString()
       }
+      // 如果人数增加且之前没有lastPlayTime，也设置lastPlayTime（用于计算预计排卡数量）
+      // 但如果之前已经有lastPlayTime，则保留它（不覆盖）
+      else if (newCount > oldCount && !arcade.status.lastPlayTime) {
+        arcade.status.lastPlayTime = new Date().toISOString()
+      }
+      // 卧槽尼玛你妈逼这个爸爸头子他妈的 肘击我的代码和意为！ 小情侣。。。
 
       // 状态数据仅保存在内存中
       await updateConfig()
