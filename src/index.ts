@@ -687,7 +687,7 @@ export function apply(ctx: Context, config: any) {
       else if (newCount > oldCount && !arcade.status.lastPlayTime) {
         arcade.status.lastPlayTime = new Date().toISOString()
       }
-      // 卧槽尼玛你妈逼这个爸爸头子他妈的 肘击我的代码和意为！ 小情侣。。。
+        // 卧槽尼玛你妈逼这个爸爸头子他妈的 肘击我的代码和意为！ 小情侣。。。
 
       // 状态数据仅保存在内存中
       await updateConfig()
