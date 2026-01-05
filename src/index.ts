@@ -708,6 +708,7 @@ export function apply(ctx: Context, config: any) {
       peopleDiff = -2 // 减少一对情侣是-2个人
     }
     // Enoizinl你好高冷。
+    // Lnizione你好聪明。
     
     // 更新情侣对数
     arcade.status.coupleCount = newCoupleCount
