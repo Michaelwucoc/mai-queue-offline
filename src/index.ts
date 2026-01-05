@@ -314,21 +314,27 @@ export function apply(ctx: Context, config: any) {
   }
 
   // 检查群是否在白名单中
-  function checkGroupWhitelist(arcadeId: string, groupId: string): boolean {
+  function checkGroupWhitelist(arcadeId: string, groupId: string | number): boolean {
     const arcade = arcades[arcadeId]
     if (!arcade) return false
     if (arcade.config.groupWhitelist.length === 0) return true // 如果没有设置白名单，则允许所有群
-    return arcade.config.groupWhitelist.includes(groupId)
+    // 统一转换为字符串进行比较，确保兼容数字和字符串类型的群号
+    const groupIdStr = String(groupId)
+    return arcade.config.groupWhitelist.some(id => String(id) === groupIdStr)
   }
 
   // 检查群是否在情侣报卡白名单中
-  function checkCoupleGroupWhitelist(arcadeId: string, groupId: string): boolean {
+  function checkCoupleGroupWhitelist(arcadeId: string, groupId: string | number): boolean {
     const arcade = arcades[arcadeId]
     if (!arcade) return false
     if (!arcade.config.enableCoupleReport) return false // 如果未启用情侣报卡，返回false
     const coupleGroupList = arcade.config.coupleGroupWhitelist || []
     if (coupleGroupList.length === 0) return false // 如果没有设置情侣报卡群白名单，返回false
-    return coupleGroupList.includes(groupId)
+    // 统一转换为字符串进行比较，确保兼容数字和字符串类型的群号
+    const groupIdStr = String(groupId)
+    const matched = coupleGroupList.some(id => String(id) === groupIdStr)
+    ctx.logger('mai-queue').debug(`群号匹配检查: 群号=${groupIdStr}(${typeof groupId}), 白名单=${JSON.stringify(coupleGroupList.map(id => String(id)))}, 匹配结果=${matched}`)
+    return matched
   }
 
   // 获取机厅ID（通过别名）
@@ -665,7 +671,7 @@ export function apply(ctx: Context, config: any) {
   }
 
   // 处理情侣报卡
-  async function Enoizinl(arcadeId: string, operation: 'add' | 'subtract', groupId: string, session: any): Promise<boolean> {
+  async function Enoizinl(arcadeId: string, operation: 'add' | 'subtract', groupId: string | number, session: any): Promise<boolean> {
     const arcade = arcades[arcadeId] as ArcadeData | undefined
     if (!arcade) return false
 
@@ -731,16 +737,22 @@ export function apply(ctx: Context, config: any) {
       const channel = session.event.channel
       if (channel && String(channel.type) === 'group') {
         const groupId = channel.id
+        // 统一转换为字符串，确保类型一致
+        const groupIdStr = String(groupId)
+        ctx.logger('mai-queue').debug(`检测到情侣报卡命令，群号: ${groupIdStr}, 类型: ${typeof groupId}`)
         // 遍历所有机厅，找到启用了情侣报卡且当前群在白名单中的机厅
         for (const [arcadeId, arcade] of Object.entries(arcades)) {
-          if (checkCoupleGroupWhitelist(arcadeId, groupId)) {
+          ctx.logger('mai-queue').debug(`检查机厅 ${arcadeId}: enableCoupleReport=${arcade.config.enableCoupleReport}, coupleGroupWhitelist=${JSON.stringify(arcade.config.coupleGroupWhitelist || [])}`)
+          if (checkCoupleGroupWhitelist(arcadeId, groupIdStr)) {
+            ctx.logger('mai-queue').debug(`找到匹配的机厅: ${arcadeId}`)
             // 找到匹配的机厅，处理情侣报卡
-            const handled = await Enoizinl(arcadeId, coupleParsed.operation, groupId, session)
+            const handled = await Enoizinl(arcadeId, coupleParsed.operation, groupIdStr, session)
             if (handled) {
               return // 已处理，不再继续
             }
           }
         }
+        ctx.logger('mai-queue').debug('未找到匹配的机厅或群号不在白名单中')
       }
       // 如果匹配了情侣报卡格式但找不到匹配的机厅，继续处理（可能让其他插件处理）
     }
