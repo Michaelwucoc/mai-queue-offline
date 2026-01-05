@@ -115,6 +115,7 @@ export const Config: Schema<{
   defaultPlayTimePerPerson: number
   playersPerMachine: number
   turboApiKey: string
+  debug: boolean
 }> = Schema.object({
   arcades: Schema.dict(Schema.object({
     config: Schema.object({
@@ -159,10 +160,23 @@ export const Config: Schema<{
   defaultPlayTimePerPerson: Schema.number().default(15).description('平均每人游玩时间（分钟，用于计算排队时间）'),
   playersPerMachine: Schema.number().default(2).description('每台机器可同时游玩人数'),
   turboApiKey: Schema.string().default('').description('TurboAPI授权密钥（格式：BotKey <key>，留空则不使用TurboAPI）'),
+  debug: Schema.boolean().default(false).description('是否启用调试日志（开启后会输出详细的调试信息）'),
 }).description('舞萌DX排卡状态报告插件配置')
 
 export function apply(ctx: Context, config: any) {
-  let { arcades: arcadesConfig, defaultMachineCount, defaultPlayTimePerPerson, playersPerMachine, turboApiKey } = config
+  let { arcades: arcadesConfig, defaultMachineCount, defaultPlayTimePerPerson, playersPerMachine, turboApiKey, debug } = config
+
+  // 日志辅助函数：根据debug开关决定是否输出调试日志
+  const logDebug = (message: string) => {
+    if (debug) {
+      ctx.logger('mai-queue').debug(message)
+    }
+  }
+  const logInfo = (message: string) => {
+    if (debug) {
+      ctx.logger('mai-queue').info(message)
+    }
+  }
 
   // 将配置转换为运行时数据结构（添加status字段）
   const arcades: Record<string, ArcadeData> = {}
@@ -227,7 +241,7 @@ export function apply(ctx: Context, config: any) {
       
       // 写入文件
       fs.writeFileSync(dataFilePath, yamlContent, 'utf8')
-      ctx.logger('mai-queue').debug('状态数据已保存到文件')
+      logDebug('状态数据已保存到文件')
     } catch (error) {
       ctx.logger('mai-queue').error('保存状态数据失败:', error)
     }
@@ -238,7 +252,7 @@ export function apply(ctx: Context, config: any) {
     try {
       const dataFilePath = getDataFilePath()
       if (!fs.existsSync(dataFilePath)) {
-        ctx.logger('mai-queue').debug('状态数据文件不存在，使用默认值')
+        logDebug('状态数据文件不存在，使用默认值')
         return
       }
       
@@ -265,7 +279,7 @@ export function apply(ctx: Context, config: any) {
         }
       }
       
-      ctx.logger('mai-queue').debug('状态数据已从文件加载')
+      logDebug('状态数据已从文件加载')
     } catch (error) {
       ctx.logger('mai-queue').error('加载状态数据失败:', error)
     }
@@ -333,7 +347,7 @@ export function apply(ctx: Context, config: any) {
     // 统一转换为字符串进行比较，确保兼容数字和字符串类型的群号
     const groupIdStr = String(groupId)
     const matched = coupleGroupList.some(id => String(id) === groupIdStr)
-    ctx.logger('mai-queue').debug(`群号匹配检查: 群号=${groupIdStr}(${typeof groupId}), 白名单=${JSON.stringify(coupleGroupList.map(id => String(id)))}, 匹配结果=${matched}`)
+    logInfo(`群号匹配检查: 群号=${groupIdStr}(${typeof groupId}), 白名单=${JSON.stringify(coupleGroupList.map(id => String(id)))}, 匹配结果=${matched}`)
     return matched
   }
 
@@ -732,29 +746,41 @@ export function apply(ctx: Context, config: any) {
     }
 
     // 0. 先尝试匹配情侣报卡格式（xql+1 或 xql-1）
+    logInfo(`收到消息: "${text}"`)
     const coupleParsed = Lnizione(text)
+    logInfo(`情侣报卡命令解析结果: ${coupleParsed ? JSON.stringify(coupleParsed) : 'null'}`)
     if (coupleParsed) {
       const channel = session.event.channel
-      if (channel && String(channel.type) === 'group') {
+      logInfo(`频道信息: ${channel ? `存在, type=${channel.type}(${typeof channel.type}), id=${channel.id}` : '不存在'}`)
+      // onebot 中 channel.type 可能是数字 0 或字符串 'group'，都需要支持
+      const channelTypeStr = channel ? String(channel.type) : ''
+      const isGroup = channel && (channelTypeStr === 'group' || channelTypeStr === '0')
+      if (isGroup) {
         const groupId = channel.id
         // 统一转换为字符串，确保类型一致
         const groupIdStr = String(groupId)
-        ctx.logger('mai-queue').debug(`检测到情侣报卡命令，群号: ${groupIdStr}, 类型: ${typeof groupId}`)
+        logInfo(`检测到情侣报卡命令，群号: ${groupIdStr}, 类型: ${typeof groupId}`)
         // 遍历所有机厅，找到启用了情侣报卡且当前群在白名单中的机厅
+        logInfo(`开始遍历机厅，共 ${Object.keys(arcades).length} 个机厅`)
         for (const [arcadeId, arcade] of Object.entries(arcades)) {
-          ctx.logger('mai-queue').debug(`检查机厅 ${arcadeId}: enableCoupleReport=${arcade.config.enableCoupleReport}, coupleGroupWhitelist=${JSON.stringify(arcade.config.coupleGroupWhitelist || [])}`)
+          logInfo(`检查机厅 ${arcadeId}: enableCoupleReport=${arcade.config.enableCoupleReport}, coupleGroupWhitelist=${JSON.stringify(arcade.config.coupleGroupWhitelist || [])}`)
           if (checkCoupleGroupWhitelist(arcadeId, groupIdStr)) {
-            ctx.logger('mai-queue').debug(`找到匹配的机厅: ${arcadeId}`)
+            logInfo(`找到匹配的机厅: ${arcadeId}`)
             // 找到匹配的机厅，处理情侣报卡
             const handled = await Enoizinl(arcadeId, coupleParsed.operation, groupIdStr, session)
             if (handled) {
+              logInfo(`情侣报卡处理成功: ${arcadeId}`)
               return // 已处理，不再继续
             }
           }
         }
-        ctx.logger('mai-queue').debug('未找到匹配的机厅或群号不在白名单中')
+        logInfo('未找到匹配的机厅或群号不在白名单中')
+      } else {
+        logInfo(`不是群组消息或频道不存在: channel=${channel ? `type=${channel.type}` : 'null'}`)
       }
       // 如果匹配了情侣报卡格式但找不到匹配的机厅，继续处理（可能让其他插件处理）
+    } else {
+      logInfo('不是情侣报卡命令格式')
     }
 
     // 1. 先尝试匹配查询格式（别名几 或 别名j）
@@ -764,7 +790,9 @@ export function apply(ctx: Context, config: any) {
       if (arcadeId) {
         // 检查群白名单：如果不在白名单，直接忽略消息（不回复）
         const channel = session.event.channel
-        if (channel && String(channel.type) === 'group' && !checkGroupWhitelist(arcadeId, channel.id)) {
+        const channelTypeStr = channel ? String(channel.type) : ''
+        const isGroup = channel && (channelTypeStr === 'group' || channelTypeStr === '0')
+        if (isGroup && !checkGroupWhitelist(arcadeId, channel.id)) {
           // 不在白名单，直接返回，不回复消息
           return
         }
@@ -790,7 +818,9 @@ export function apply(ctx: Context, config: any) {
 
       // 检查群白名单：上报需要检查白名单
       const channel = session.event.channel
-      if (channel && String(channel.type) === 'group' && !checkGroupWhitelist(arcadeId, channel.id)) {
+      const channelTypeStr = channel ? String(channel.type) : ''
+      const isGroup = channel && (channelTypeStr === 'group' || channelTypeStr === '0' || channel.type === 0)
+      if (isGroup && !checkGroupWhitelist(arcadeId, channel.id)) {
         // 不在白名单，直接返回，不回复消息
         return
       }
@@ -863,6 +893,7 @@ export function apply(ctx: Context, config: any) {
       arcadeData.status.coupleCount = 0 // 重置情侣对数
     }
     await updateConfig()
+    // 自动重置是重要操作，始终记录日志
     ctx.logger('mai-queue').info('所有机厅人数已由Bot自动归零')
   }
 
