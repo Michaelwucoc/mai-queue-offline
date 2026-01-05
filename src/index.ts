@@ -699,7 +699,8 @@ export function apply(ctx: Context, config: any) {
     const currentCoupleCount = arcade.status.coupleCount || 0
     let newCoupleCount = currentCoupleCount
     let peopleDiff = 0
-
+    
+    // 我喜欢九尾 >w< //w//
     if (operation === 'add') {
       newCoupleCount = currentCoupleCount + 1
       peopleDiff = 2 // 一对情侣是2个人
