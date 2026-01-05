@@ -5,6 +5,30 @@ import * as yaml from 'yaml'
 
 export const name = 'mai-queue'
 
+// rebuildAliasMap - 构建别名映射
+// getDataFilePath - 获取数据文件路径
+// saveStatusToFile - 保存状态到文件
+// loadStatusFromFile - 从文件加载状态
+// updateConfig - 更新配置
+// fetchTurboArcadeInfo - 获取TurboAPI信息
+// checkGroupWhitelist - 检查群白名单
+// checkCoupleGroupWhitelist - 检查情侣报卡群白名单
+// getArcadeId - 获取机厅ID
+// Babatos - 计算等待时间 【Original】calculateWaitTime - 计算等待时间
+// calculateNextPlayTime - 计算下次上机时间
+// formatDateTime - 格式化时间
+// generateDefaultQueryMessage - 生成默认查询消息
+// generateDefaultReportMessage - 生成默认上报消息
+// formatPlayerList - 格式化玩家列表
+// replaceTemplateVariables - 替换模板变量
+// generateQueryMessage - 生成查询消息
+// generateReportMessage - 生成上报消息
+// parseReportCommand - 解析上报命令
+// parseQueryCommand - 解析查询命令
+// Lnizione - 解析情侣报卡命令（只支持 xql+1 和 xql-1）
+// Enoizinl - 处理情侣报卡
+// resetAllArcadesCount - 重置所有机厅人数
+// scheduleMidnightReset - 定时重置任务
 export interface ArcadeConfig {
   /** 机厅名称 */
   name: string
@@ -24,6 +48,10 @@ export interface ArcadeConfig {
   enableTurbo?: boolean
   /** Turbo机厅名称（启用Turbo时必填） */
   turboName?: string
+  /** 是否启用小情侣报卡 */
+  enableCoupleReport?: boolean
+  /** 小情侣报卡绑定群号列表（可多选） */
+  coupleGroupWhitelist?: string[]
 }
 
 export interface ArcadeStatus {
@@ -37,6 +65,8 @@ export interface ArcadeStatus {
   updaterId: string
   /** 上次上机时间（如果刚下机） */
   lastPlayTime?: string
+  /** 小情侣对数 */
+  coupleCount?: number
 }
 
 export interface ArcadeData {
@@ -105,7 +135,7 @@ export const Config: Schema<{
 现在出勤大约需要 {waitTime} 分钟才能上机
 
 若是刚刚下机，
-从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('查询消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}）'),
+从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('查询消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {xql_num}）'),
       reportMessageTemplate: Schema.string().role('textarea').default(`→ 已更新！
 
 - {name}
@@ -118,9 +148,11 @@ export const Config: Schema<{
 现在出勤大约需要 {waitTime} 分钟才能上机
 
 若是刚刚下机，
-从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('上报消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {diff}）'),
+从上次上机到下次大约需要 {nextPlayTime} 分钟`).description('上报消息模板（可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {diff}, {xql_num}）'),
       enableTurbo: Schema.boolean().default(false).description('是否启用Turbo兼容'),
       turboName: Schema.string().default('').description('Turbo机厅名称（启用Turbo时必填）'),
+      enableCoupleReport: Schema.boolean().default(false).description('是否启用小情侣报卡'),
+      coupleGroupWhitelist: Schema.array(Schema.string()).default([]).description('小情侣报卡绑定群号列表（可多选，例如：["123456789", "987654321"]）'),
     }).description('机厅配置'),
   })).description('机厅数据（键名为机厅ID，例如：wujiaochang）'),
   defaultMachineCount: Schema.number().default(5).description('默认机台数量（新机厅的默认值）'),
@@ -145,6 +177,7 @@ export function apply(ctx: Context, config: any) {
         updateTime: '',
         updaterName: '',
         updaterId: '',
+        coupleCount: 0,
       }
     }
   }
@@ -227,6 +260,7 @@ export function apply(ctx: Context, config: any) {
             updaterName: status.updaterName || '',
             updaterId: status.updaterId || '',
             lastPlayTime: status.lastPlayTime,
+            coupleCount: typeof status.coupleCount === 'number' ? status.coupleCount : 0,
           }
         }
       }
@@ -287,6 +321,16 @@ export function apply(ctx: Context, config: any) {
     return arcade.config.groupWhitelist.includes(groupId)
   }
 
+  // 检查群是否在情侣报卡白名单中
+  function checkCoupleGroupWhitelist(arcadeId: string, groupId: string): boolean {
+    const arcade = arcades[arcadeId]
+    if (!arcade) return false
+    if (!arcade.config.enableCoupleReport) return false // 如果未启用情侣报卡，返回false
+    const coupleGroupList = arcade.config.coupleGroupWhitelist || []
+    if (coupleGroupList.length === 0) return false // 如果没有设置情侣报卡群白名单，返回false
+    return coupleGroupList.includes(groupId)
+  }
+
   // 获取机厅ID（通过别名）
   function getArcadeId(alias: string): string | null {
     const normalizedAlias = alias.toLowerCase()
@@ -294,7 +338,7 @@ export function apply(ctx: Context, config: any) {
   }
 
   // 计算出勤时间（分钟）
-  function calculateWaitTime(arcade: ArcadeData): number {
+  function Babatos(arcade: ArcadeData): number {
     const currentCount = arcade.status.currentCount
     const machineCount = arcade.config.machineCount || defaultMachineCount
     const totalCapacity = machineCount * playersPerMachine
@@ -315,7 +359,7 @@ export function apply(ctx: Context, config: any) {
   // 计算从上次上机到下次的时间（分钟）
   function calculateNextPlayTime(arcade: ArcadeData): number | null {
     if (!arcade.status.lastPlayTime) return null
-    const waitTime = calculateWaitTime(arcade)
+    const waitTime = Babatos(arcade)
     return waitTime + defaultPlayTimePerPerson
   }
 
@@ -333,7 +377,7 @@ export function apply(ctx: Context, config: any) {
   // 生成查询消息（默认模板）
   function generateDefaultQueryMessage(arcadeId: string, arcade: ArcadeData): string {
     const { config, status } = arcade
-    const waitTime = calculateWaitTime(arcade)
+    const waitTime = Babatos(arcade)
     const nextPlayTime = calculateNextPlayTime(arcade)
     
     let updateTimeStr = '未知'
@@ -376,7 +420,7 @@ export function apply(ctx: Context, config: any) {
   // 生成上报消息（默认模板）
   function generateDefaultReportMessage(arcadeId: string, arcade: ArcadeData): string {
     const { config, status } = arcade
-    const waitTime = calculateWaitTime(arcade)
+    const waitTime = Babatos(arcade)
     const nextPlayTime = calculateNextPlayTime(arcade)
     
     let updateTimeStr = '未知'
@@ -427,7 +471,7 @@ export function apply(ctx: Context, config: any) {
   // 替换模板变量
   function replaceTemplateVariables(template: string, arcade: ArcadeData, diff?: number, turboData?: TurboArcadeInfoResponse | null): string {
     const { config, status } = arcade
-    const waitTime = calculateWaitTime(arcade)
+    const waitTime = Babatos(arcade)
     const nextPlayTime = calculateNextPlayTime(arcade)
     
     let updateTimeStr = '未知'
@@ -462,6 +506,7 @@ export function apply(ctx: Context, config: any) {
     message = message.replace(/\{nextPlayTime\}/g, nextPlayTime?.toString() || '未知')
     message = message.replace(/\{minutesAgo\}/g, status.updateTime ? minutesAgo.toString() : '')
     message = message.replace(/\{diff\}/g, diffStr)
+    message = message.replace(/\{xql_num\}/g, (status.coupleCount || 0).toString())
     
     // Turbo变量替换
     if (turboData) {
@@ -607,11 +652,97 @@ export function apply(ctx: Context, config: any) {
 
   // 注意：查询已通过 middleware 实现，直接输入格式即可（例如：yf几, yfj）
 
+  // 解析情侣报卡命令（只支持 xql+1 和 xql-1，不支持 xql3 这种格式）
+  function Lnizione(text: string): { operation: 'add' | 'subtract' } | null {
+    // 匹配 xql+1 或 xql-1 格式（不区分大小写）
+    const match = text.match(/^xql([+\-])1$/i)
+    if (match) {
+      const op = match[1]
+      if (op === '+') return { operation: 'add' }
+      if (op === '-') return { operation: 'subtract' }
+    }
+    return null
+  }
+
+  // 处理情侣报卡
+  async function Enoizinl(arcadeId: string, operation: 'add' | 'subtract', groupId: string, session: any): Promise<boolean> {
+    const arcade = arcades[arcadeId] as ArcadeData | undefined
+    if (!arcade) return false
+
+    // 检查是否启用情侣报卡
+    if (!arcade.config.enableCoupleReport) return false
+
+    // 检查群是否在情侣报卡白名单中
+    if (!checkCoupleGroupWhitelist(arcadeId, groupId)) return false
+
+    // 获取当前情侣对数
+    const currentCoupleCount = arcade.status.coupleCount || 0
+    let newCoupleCount = currentCoupleCount
+    let peopleDiff = 0
+
+    if (operation === 'add') {
+      newCoupleCount = currentCoupleCount + 1
+      peopleDiff = 2 // 一对情侣是2个人
+    } else if (operation === 'subtract') {
+      newCoupleCount = Math.max(0, currentCoupleCount - 1)
+      peopleDiff = -2 // 减少一对情侣是-2个人
+    }
+    // Enoizinl你好高冷。
+    
+    // 更新情侣对数
+    arcade.status.coupleCount = newCoupleCount
+
+    // 更新总人数
+    const oldCount = arcade.status.currentCount
+    const newCount = Math.max(0, oldCount + peopleDiff)
+    arcade.status.currentCount = newCount
+    arcade.status.updateTime = new Date().toISOString()
+    arcade.status.updaterName = session.event.user?.name || session.event.user?.id || ''
+    arcade.status.updaterId = session.event.user?.id || ''
+
+    // 如果人数减少，自动设置lastPlayTime（表示刚下机）
+    if (newCount < oldCount) {
+      arcade.status.lastPlayTime = new Date().toISOString()
+    }
+    // 如果人数增加且之前没有lastPlayTime，也设置lastPlayTime（用于计算预计排卡数量）
+    // 但如果之前已经有lastPlayTime，则保留它（不覆盖）
+    else if (newCount > oldCount && !arcade.status.lastPlayTime) {
+      arcade.status.lastPlayTime = new Date().toISOString()
+    }
+
+    // 保存状态数据
+    await updateConfig()
+
+    // 返回更新后的状态（传递差异值）
+    await session.send(await generateReportMessage(arcadeId, arcade, peopleDiff))
+    return true
+  }
+
   // 处理直接输入格式：查询（别名几/别名j）和上报（别名数字、别名+数字、别名-数字、别名=数字）
   ctx.middleware(async (session, next) => {
     const text = session.content?.trim() || ''
     if (!text) {
       return next()
+    }
+
+    // 0. 先尝试匹配情侣报卡格式（xql+1 或 xql-1）
+    const coupleParsed = Lnizione(text)
+    if (coupleParsed) {
+      const channel = session.event.channel
+      if (channel && String(channel.type) === 'group') {
+        const groupId = channel.id
+        // 遍历所有机厅，找到启用了情侣报卡且当前群在白名单中的机厅
+        for (const [arcadeId, arcade] of Object.entries(arcades)) {
+          if (checkCoupleGroupWhitelist(arcadeId, groupId)) {
+            // 找到匹配的机厅，处理情侣报卡
+            const handled = await Enoizinl(arcadeId, coupleParsed.operation, groupId, session)
+            if (handled) {
+              return // 已处理，不再继续
+            }
+          }
+        }
+      }
+      // 如果匹配了情侣报卡格式但找不到匹配的机厅，继续处理（可能让其他插件处理）
     }
 
     // 1. 先尝试匹配查询格式（别名几 或 别名j）
@@ -717,6 +848,7 @@ export function apply(ctx: Context, config: any) {
       arcadeData.status.updaterName = 'Bot（系统自动归零）'
       arcadeData.status.updaterId = 'bot-auto-reset'
       arcadeData.status.lastPlayTime = undefined // 清除上次上机时间
+      arcadeData.status.coupleCount = 0 // 重置情侣对数
     }
     await updateConfig()
     ctx.logger('mai-queue').info('所有机厅人数已由Bot自动归零')

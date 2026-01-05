@@ -36,14 +36,20 @@ plugins:
           enableTurbo: false
           # Turbo机厅名称（启用Turbo时必填，需要与Turbo系统中的机厅名称一致）
           turboName: ""
+          # 是否启用小情侣报卡
+          enableCoupleReport: false
+          # 小情侣报卡绑定群号列表（可多选，例如：["123456789", "987654321"]）
+          coupleGroupWhitelist: []
           # 自定义查询消息模板（可选，留空使用默认模板）
-          # 可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}
+          # 可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {xql_num}
           # Turbo变量（仅当enableTurbo为true时可用）：
           #   - {thirtyMinutesPlayer}, {oneHourPlayer}, {twoHoursPlayer} - 玩家数
           #   - {thirtyMinutesPlayCount}, {oneHourPlayCount}, {twoHoursPlayCount} - 游玩次数
           #   - {recentPlayername}, {recentPlayername_thirty} - 玩家列表（每行前面两个空格）
           #   - {arcadePlayCount}, {arcadeRequested}, {arcadeCachedRequest}, {arcadeFixedRequest} - 机厅统计数据
           #   - {arcadeCachedHitRate} - 缓存命中率（自动转换为百分比，如：64.92%）
+          # 情侣报卡变量：
+          #   - {xql_num} - 小情侣对数（单独计算）
           # queryMessageTemplate: |
           #   → OK！查到了！
           #   
@@ -72,6 +78,10 @@ plugins:
           groupWhitelist: []  # 空列表表示所有群都可以使用
           enableTurbo: false
           turboName: ""
+          # 启用小情侣报卡示例
+          enableCoupleReport: true
+          coupleGroupWhitelist:
+            - "123456789"  # 只有在这个群里输入xql+1或xql-1才会给悠方机厅+2或-2人
         # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
       
       # Turbo机厅示例
