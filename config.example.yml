@@ -3,71 +3,36 @@
 
 plugins:
   mai-queue:
-    # 默认机台数量
     defaultMachineCount: 5
-    # 平均每人游玩时间（分钟）
     defaultPlayTimePerPerson: 15
-    # 每台机器可同时游玩人数
     playersPerMachine: 2
-    # TurboAPI授权密钥（格式：BotKey <key>，留空则不使用TurboAPI）
-    # 例如：979c5f40-130f-4246-94bd-6b2973040b5e
-    turboApiKey: ""
-    # 是否启用调试日志（开启后会输出详细的调试信息，用于排查问题）
+    nearcadeApiToken: ""
+    nearcadeBaseUrl: "https://nearcade.cn"
     debug: false
-    # 机厅数据
     arcades:
-      # 机厅ID（唯一标识）
       wujiaochang:
         config:
-          # 机厅名称
           name: 上海五角场百联 ZX 造趣场 AKIBAGO
-          # 别名列表（支持多个别名）
           aliases:
             - wjc
             - wujiaochang
             - 五角场
-          # 机台数量
           machineCount: 5
-          # 店铺通知
+          address: ""
+          directionGuide: ""
           notice: 冬暖夏暖，记得备短袖。最近已改良通风！
-          # 群白名单（为空则允许所有群）
           groupWhitelist:
             - "123456789"
             - "987654321"
-          # 是否启用Turbo兼容（需要配置turboApiKey和turboName）
-          enableTurbo: false
-          # Turbo机厅名称（启用Turbo时必填，需要与Turbo系统中的机厅名称一致）
-          turboName: ""
-          # 是否启用小情侣报卡
+          enableNearcade: false
+          nearcadeId: 0
+          nearcadeSource: bemanicn
+          nearcadeGameType: 1
+          nearcadeGameIdOverride: 0
+          nearcadeLinkOverride: ""
           enableCoupleReport: false
-          # 小情侣报卡绑定群号列表（可多选，例如：["123456789", "987654321"]）
           coupleGroupWhitelist: []
-          # 自定义查询消息模板（可选，留空使用默认模板）
-          # 可用变量：{name}, {currentCount}, {machineCount}, {updateTime}, {updaterName}, {updaterId}, {updaterInfo}, {notice}, {waitTime}, {nextPlayTime}, {minutesAgo}, {xql_num}
-          # Turbo变量（仅当enableTurbo为true时可用）：
-          #   - {thirtyMinutesPlayer}, {oneHourPlayer}, {twoHoursPlayer} - 玩家数
-          #   - {thirtyMinutesPlayCount}, {oneHourPlayCount}, {twoHoursPlayCount} - 游玩次数
-          #   - {recentPlayername}, {recentPlayername_thirty} - 玩家列表（每行前面两个空格）
-          #   - {arcadePlayCount}, {arcadeRequested}, {arcadeCachedRequest}, {arcadeFixedRequest} - 机厅统计数据
-          #   - {arcadeCachedHitRate} - 缓存命中率（自动转换为百分比，如：64.92%）
-          # 情侣报卡变量：
-          #   - {xql_num} - 小情侣对数（单独计算）
-          # queryMessageTemplate: |
-          #   → OK！查到了！
-          #   
-          #   - {name}
-          #   目前人数: {currentCount} 人
-          #   机台数量: {machineCount} 台
-          #   更新时间: {updateTime}
-          #   更新玩家: {updaterName}({updaterId})
-          #   店铺通知: {notice}
-          #   现在出勤大约需要 {waitTime} 分钟才能上机
-          #   
-          #   若是刚刚下机，
-          #   从上次上机到下次大约需要 {nextPlayTime} 分钟
-        # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
-      
-      # 另一个机厅示例
+
       youfang:
         config:
           name: 悠方店
@@ -77,60 +42,39 @@ plugins:
             - 悠方
           machineCount: 4
           notice: 欢迎来到悠方店！
-          groupWhitelist: []  # 空列表表示所有群都可以使用
-          enableTurbo: false
-          turboName: ""
-          # 启用小情侣报卡示例
+          groupWhitelist: []
+          enableNearcade: false
           enableCoupleReport: true
           coupleGroupWhitelist:
-            - "123456789"  # 只有在这个群里输入xql+1或xql-1才会给悠方机厅+2或-2人
-        # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
-      
-      # Turbo机厅示例
+            - "123456789"
+
       liehuo:
         config:
-          name: 上海街机烈火
+          name: 街机烈火
           aliases:
             - lh
             - liehuo
             - 烈火
           machineCount: 8
+          address: 上海市静安区江宁路77号恒顺大楼4层
+          directionGuide: |
+            南京西路地铁站1号口步行430米
+            音游机台在店内最内侧房间，一直往里走即可
           notice: 欢迎来到烈火！
           groupWhitelist: []
-          # 启用Turbo兼容
-          enableTurbo: true
-          # Turbo系统中的机厅名称（必须与Turbo系统中的名称完全一致）
-          turboName: "上海街机烈火"
-          # 自定义模板示例（使用Turbo变量）
-          queryMessageTemplate: |
-            → OK！查到了！
-            
+          enableNearcade: true
+          nearcadeId: 10001
+          nearcadeSource: bemanicn
+          nearcadeGameType: 1
+          reportMessageTemplate: |
+            → 已更新！
+
             - {name}
-            目前人数: {currentCount} 人 ({minutesAgo} 分钟前)
+            目前人数: {currentCount} 人 {diff}
+            平台人数: {nearcadeCount} 人（差 {nearcadeDiff}）
             机台数量: {machineCount} 台
-            更新时间: {updateTime}
-            更新玩家: {updaterInfo}
-            
-            [Turbo数据]
-            30分钟玩家数: {thirtyMinutesPlayer}
-            1小时玩家数: {oneHourPlayer}
-            2小时玩家数: {twoHoursPlayer}
-            30分钟游玩次数: {thirtyMinutesPlayCount}
-            1小时游玩次数: {oneHourPlayCount}
-            2小时游玩次数: {twoHoursPlayCount}
-            
-            机厅游玩次数: {arcadePlayCount}
-            机厅请求数: {arcadeRequested}
-            缓存请求数: {arcadeCachedRequest}
-            固定请求数: {arcadeFixedRequest}
-            缓存命中率: {arcadeCachedHitRate}
-            
-            最近玩家:
-            {recentPlayername}
-            
-            最近30分钟玩家:
-            {recentPlayername_thirty}
-        # 注意：status字段（当前人数、更新时间等）是运行时数据，会自动更新，不需要在配置中设置
-
-
-
+            地址: {address}
+            到店引导:
+            　　{directionGuide}
+            {nearcadeSyncStatus}
+            {nearcadeLink}
