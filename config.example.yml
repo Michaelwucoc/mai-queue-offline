@@ -1,5 +1,4 @@
 # Koishi 配置文件示例
-# 舞萌DX排卡状态报告插件配置
 
 plugins:
   mai-queue:
@@ -13,68 +12,32 @@ plugins:
       wujiaochang:
         config:
           name: 上海五角场百联 ZX 造趣场 AKIBAGO
-          aliases:
-            - wjc
-            - wujiaochang
-            - 五角场
+          aliases: [wjc, 五角场]
           machineCount: 5
-          address: ""
-          directionGuide: ""
-          notice: 冬暖夏暖，记得备短袖。最近已改良通风！
-          groupWhitelist:
-            - "123456789"
-            - "987654321"
+          notice: 冬暖夏暖，记得备短袖
+          groupWhitelist: ["123456789"]
           enableNearcade: false
           nearcadeId: 0
-          nearcadeSource: bemanicn
-          nearcadeGameType: 1
-          nearcadeGameIdOverride: 0
-          nearcadeLinkOverride: ""
-          enableCoupleReport: false
-          coupleGroupWhitelist: []
 
       youfang:
         config:
-          name: 悠方店
-          aliases:
-            - yf
-            - youfang
-            - 悠方
+          name: 悠方星河奇迹体验馆
+          aliases: [yf, 悠方]
           machineCount: 4
           notice: 欢迎来到悠方店！
           groupWhitelist: []
-          enableNearcade: false
-          enableCoupleReport: true
-          coupleGroupWhitelist:
-            - "123456789"
+          enableNearcade: true
+          nearcadeId: 16342
 
       liehuo:
         config:
           name: 街机烈火
-          aliases:
-            - lh
-            - liehuo
-            - 烈火
+          aliases: [lh, 烈火]
           machineCount: 8
           address: 上海市静安区江宁路77号恒顺大楼4层
           directionGuide: |
             南京西路地铁站1号口步行430米
-            音游机台在店内最内侧房间，一直往里走即可
           notice: 欢迎来到烈火！
           groupWhitelist: []
           enableNearcade: true
           nearcadeId: 10001
-          nearcadeSource: bemanicn
-          nearcadeGameType: 1
-          reportMessageTemplate: |
-            → 已更新！
-
-            - {name}
-            目前人数: {currentCount} 人 {diff}
-            平台人数: {nearcadeCount} 人（差 {nearcadeDiff}）
-            机台数量: {machineCount} 台
-            地址: {address}
-            到店引导:
-            　　{directionGuide}
-            {nearcadeSyncStatus}
-            {nearcadeLink}

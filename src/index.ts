@@ -5,12 +5,13 @@ import * as yaml from 'yaml'
 import {
   NearcadeAttendanceResponse,
   NearcadeClient,
-  NearcadeSource,
 } from './nearcade'
 
 export const name = 'mai-queue'
 
 const NEARCADE_SYNC_SUCCESS = '已同步到 Nearcade NET.'
+const NEARCADE_SYNC_FAILURE = '暂时无法连接到 Nearcade NET.'
+const NEARCADE_MAIMAI_TITLE_ID = 1
 
 const defaultQueryTemplate = `→ OK！查到了！
 
@@ -61,10 +62,6 @@ export interface ArcadeConfig {
   reportMessageTemplate?: string
   enableNearcade?: boolean
   nearcadeId?: number
-  nearcadeSource?: NearcadeSource
-  nearcadeGameType?: 1 | 3 | 4 | 5 | 6 | 8
-  nearcadeGameIdOverride?: number
-  nearcadeLinkOverride?: string
   enableCoupleReport?: boolean
   coupleGroupWhitelist?: string[]
 }
@@ -109,22 +106,8 @@ export const Config: Schema<{
       groupWhitelist: Schema.array(Schema.string()).default([]).description('群白名单（为空则允许所有群使用）'),
       queryMessageTemplate: Schema.string().role('textarea').default(defaultQueryTemplate).description('查询消息模板'),
       reportMessageTemplate: Schema.string().role('textarea').default(defaultReportTemplate).description('上报消息模板'),
-      enableNearcade: Schema.boolean().default(false).description('是否启用 Nearcade 同步'),
-      nearcadeId: Schema.number().default(0).description('Nearcade 机厅 ID（配合 nearcade.search 命令填写）'),
-      nearcadeSource: Schema.union([
-        Schema.const('bemanicn').description('国内（BEMANICN 地图）'),
-        Schema.const('ziv').description('海外（Zenius-I-vanisher）'),
-      ]).default('bemanicn').description('Nearcade 数据源'),
-      nearcadeGameType: Schema.union([
-        Schema.const(1).description('舞萌 DX (maimai DX)'),
-        Schema.const(3).description('中二节奏 (CHUNITHM)'),
-        Schema.const(4).description('SOUND VOLTEX'),
-        Schema.const(5).description('beatmania IIDX'),
-        Schema.const(6).description('jubeat'),
-        Schema.const(8).description('GuitarFreaks / DrumMania'),
-      ]).default(1).description('同步到 Nearcade 的机种（出勤统计按此机种）'),
-      nearcadeGameIdOverride: Schema.number().default(0).description('高级：手动指定 gameId（非 0 时跳过自动解析）'),
-      nearcadeLinkOverride: Schema.string().default('').description('高级：自定义机厅链接（留空则自动生成）'),
+      enableNearcade: Schema.boolean().default(false).description('同步到 Nearcade'),
+      nearcadeId: Schema.number().default(0).description('Nearcade 机厅 ID（nearcade.search 查询）'),
       enableCoupleReport: Schema.boolean().default(false).description('是否启用小情侣报卡'),
       coupleGroupWhitelist: Schema.array(Schema.string()).default([]).description('小情侣报卡绑定群号列表'),
     }).description('机厅配置'),
@@ -132,8 +115,8 @@ export const Config: Schema<{
   defaultMachineCount: Schema.number().default(5).description('默认机台数量'),
   defaultPlayTimePerPerson: Schema.number().default(15).description('平均每人游玩时间（分钟）'),
   playersPerMachine: Schema.number().default(2).description('每台机器可同时游玩人数'),
-  nearcadeApiToken: Schema.string().default('').description('Nearcade API Token（上报同步必填，Bearer Token）'),
-  nearcadeBaseUrl: Schema.string().default('https://nearcade.cn').description('Nearcade 服务地址（可自定义）'),
+  nearcadeApiToken: Schema.string().default('').description('Nearcade API Token（同步必填）'),
+  nearcadeBaseUrl: Schema.string().default('https://nearcade.cn').description('Nearcade 地址'),
   debug: Schema.boolean().default(false).description('是否启用调试日志'),
 }).description('舞萌DX排卡状态报告插件配置')
 
@@ -272,31 +255,33 @@ export function apply(ctx: Context, config: any) {
   async function fetchNearcadeAttendance(arcade: ArcadeData): Promise<NearcadeAttendanceResponse | null> {
     const cfg = arcade.config
     if (!isNearcadeEnabled(cfg)) return null
-    return nearcade.getAttendance(cfg.nearcadeSource || 'bemanicn', cfg.nearcadeId!)
+    return nearcade.getAttendance(cfg.nearcadeId!)
   }
 
   // 因为他的 BilibiliWorld 门票没抢到。
   async function TrusTKB(arcade: ArcadeData, count: number): Promise<string> {
     const cfg = arcade.config
-    if (!isNearcadeEnabled(cfg) || !nearcadeApiToken) return ''
+    if (!isNearcadeEnabled(cfg)) return ''
 
-    const source = (cfg.nearcadeSource || 'bemanicn') as NearcadeSource
-    const titleId = cfg.nearcadeGameType ?? 1
+    if (!nearcadeApiToken) {
+      ctx.logger('mai-queue').warn(`Nearcade 同步失败: ${cfg.name} - 未配置 nearcadeApiToken`)
+      return NEARCADE_SYNC_FAILURE
+    }
+
+    const titleId = NEARCADE_MAIMAI_TITLE_ID
     const gameId = await nearcade.resolveGameId(
-      source,
       cfg.nearcadeId!,
       titleId,
       cfg.name,
-      cfg.nearcadeGameIdOverride,
+      cfg.aliases,
     )
 
     if (!gameId) {
       ctx.logger('mai-queue').warn(`Nearcade 机种解析失败: ${cfg.name} (id=${cfg.nearcadeId}, titleId=${titleId})`)
-      return ''
+      return NEARCADE_SYNC_FAILURE
     }
 
     const result = await nearcade.updateAttendance(
-      source,
       cfg.nearcadeId!,
       gameId,
       count,
@@ -306,7 +291,7 @@ export function apply(ctx: Context, config: any) {
     if (result.ok) return NEARCADE_SYNC_SUCCESS
 
     ctx.logger('mai-queue').warn(`Nearcade 同步失败: ${cfg.name} - ${result.message}`)
-    return ''
+    return NEARCADE_SYNC_FAILURE
   }
 
   // u方招财猫叛变成 xj工具人了。
@@ -340,25 +325,19 @@ export function apply(ctx: Context, config: any) {
   async function resolveNearcadeCount(arcade: ArcadeData, data: NearcadeAttendanceResponse | null): Promise<number> {
     if (!data || !isNearcadeEnabled(arcade.config)) return 0
     const cfg = arcade.config
-    const titleId = cfg.nearcadeGameType ?? 1
-    const source = (cfg.nearcadeSource || 'bemanicn') as NearcadeSource
+    const titleId = NEARCADE_MAIMAI_TITLE_ID
     const gameId = await nearcade.resolveGameId(
-      source,
       cfg.nearcadeId!,
       titleId,
       cfg.name,
-      cfg.nearcadeGameIdOverride,
+      cfg.aliases,
     )
-    if (gameId && data.games?.length) {
-      const match = data.games.find(g => g.gameId === gameId)
-      if (match) return match.total ?? 0
-    }
-    return nearcade.getAttendanceCount(data, titleId)
+    return nearcade.getAttendanceCount(data, titleId, gameId)
   }
 
   function buildNearcadeLink(config: ArcadeConfig): string {
     if (!isNearcadeEnabled(config)) return ''
-    return nearcade.buildShopLink(config.nearcadeId!, config.nearcadeLinkOverride)
+    return nearcade.buildShopLink(config.nearcadeId!)
   }
 
   function replaceTemplateVariables(
@@ -389,7 +368,7 @@ export function apply(ctx: Context, config: any) {
       diffStr = diff > 0 ? `+${diff}` : `${diff}`
     }
 
-    const titleId = config.nearcadeGameType ?? 1
+    const titleId = NEARCADE_MAIMAI_TITLE_ID
     const nearcadeCount = extras.nearcadeCount ?? nearcade.getAttendanceCount(extras.nearcadeData ?? null, titleId)
     const nearcadeDiff = status.currentCount - nearcadeCount
     const nearcadeDiffStr = nearcadeDiff > 0 ? `+${nearcadeDiff}` : `${nearcadeDiff}`
@@ -507,6 +486,7 @@ export function apply(ctx: Context, config: any) {
     return match ? match[1] : null
   }
 
+  // 夫妻，好耶！
   function Lnizione(text: string): { operation: 'add' | 'subtract' } | null {
     const match = text.match(/^xql([+\-])1$/i)
     if (!match) return null

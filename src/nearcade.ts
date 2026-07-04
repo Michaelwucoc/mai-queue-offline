@@ -1,5 +1,3 @@
-export type NearcadeSource = 'bemanicn' | 'ziv'
-
 export interface NearcadeShopGame {
   gameId: number
   titleId: number
@@ -43,6 +41,19 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '')
 }
 
+function buildSearchKeywords(shopName?: string, aliases: string[] = []): string[] {
+  const keywords = new Set<string>()
+  for (const value of [shopName, ...aliases]) {
+    if (!value) continue
+    keywords.add(value)
+    for (const part of value.split(/[·（）()\-—\s]+/)) {
+      const trimmed = part.trim()
+      if (trimmed.length >= 2) keywords.add(trimmed)
+    }
+  }
+  return [...keywords]
+}
+
 export class NearcadeClient {
   private readonly baseUrl: string
   private readonly gameIdCache = new Map<string, number>()
@@ -51,13 +62,12 @@ export class NearcadeClient {
     this.baseUrl = normalizeBaseUrl(baseUrl)
   }
 
-  buildShopLink(shopId: number, linkOverride?: string): string {
-    if (linkOverride) return linkOverride
+  buildShopLink(shopId: number): string {
     return `${this.baseUrl}/shops/${shopId}`
   }
 
-  private cacheKey(source: NearcadeSource, shopId: number, titleId: number): string {
-    return `${source}:${shopId}:${titleId}`
+  private cacheKey(shopId: number, titleId: number): string {
+    return `${shopId}:${titleId}`
   }
 
   async listShops(keyword?: string, page = 1, limit = 5): Promise<NearcadeListShopsResponse | null> {
@@ -75,8 +85,8 @@ export class NearcadeClient {
     }
   }
 
+  /** GET /api/shops/{id}/attendance — 见 https://nearcade.apifox.cn */
   async getAttendance(
-    source: NearcadeSource,
     shopId: number,
     reported?: boolean,
   ): Promise<NearcadeAttendanceResponse | null> {
@@ -86,7 +96,7 @@ export class NearcadeClient {
         params.set('reported', reported ? 'true' : 'false')
       }
       const query = params.toString()
-      const url = `${this.baseUrl}/api/shops/${source}/${shopId}/attendance${query ? `?${query}` : ''}`
+      const url = `${this.baseUrl}/api/shops/${shopId}/attendance${query ? `?${query}` : ''}`
       const response = await fetch(url)
       if (!response.ok) return null
       return await response.json() as NearcadeAttendanceResponse
@@ -95,8 +105,8 @@ export class NearcadeClient {
     }
   }
 
+  /** POST /api/shops/{id}/attendance — Bearer API 令牌 */
   async updateAttendance(
-    source: NearcadeSource,
     shopId: number,
     gameId: number,
     count: number,
@@ -104,7 +114,7 @@ export class NearcadeClient {
     comment = 'Update from mai-queue bot',
   ): Promise<NearcadeUpdateResult> {
     try {
-      const response = await fetch(`${this.baseUrl}/api/shops/${source}/${shopId}/attendance`, {
+      const response = await fetch(`${this.baseUrl}/api/shops/${shopId}/attendance`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -141,36 +151,25 @@ export class NearcadeClient {
   }
 
   async resolveGameId(
-    source: NearcadeSource,
     shopId: number,
     titleId: number,
     shopName?: string,
-    gameIdOverride?: number,
+    aliases: string[] = [],
   ): Promise<number | null> {
-    if (gameIdOverride && gameIdOverride > 0) {
-      return gameIdOverride
-    }
-
-    const key = this.cacheKey(source, shopId, titleId)
+    const key = this.cacheKey(shopId, titleId)
     const cached = this.gameIdCache.get(key)
     if (cached) return cached
 
-    const attendance = await this.getAttendance(source, shopId)
+    const attendance = await this.getAttendance(shopId)
     if (attendance?.games?.length) {
-      const fromAttendance = attendance.games.find(
-        g => g.titleId === titleId || g.gameId === titleId,
-      ) ?? attendance.games.find(g => {
-        const idStr = String(g.gameId)
-        return idStr.endsWith(String(titleId).padStart(3, '0'))
-      })
+      const fromAttendance = attendance.games.find(g => g.titleId === titleId)
       if (fromAttendance) {
         this.gameIdCache.set(key, fromAttendance.gameId)
         return fromAttendance.gameId
       }
     }
 
-    const keywords = [shopName, String(shopId)].filter(Boolean) as string[]
-    for (const keyword of keywords) {
+    for (const keyword of buildSearchKeywords(shopName, aliases)) {
       const result = await this.listShops(keyword, 1, 20)
       const shop = result?.shops?.find(s => s.id === shopId)
       if (shop?.games?.length) {
@@ -185,10 +184,14 @@ export class NearcadeClient {
     return null
   }
 
-  getAttendanceCount(data: NearcadeAttendanceResponse | null, titleId: number): number {
+  getAttendanceCount(data: NearcadeAttendanceResponse | null, titleId: number, gameId?: number | null): number {
     if (!data?.games?.length) return 0
-    const game = data.games.find(g => g.titleId === titleId)
-    if (game) return game.total ?? 0
+    if (gameId) {
+      const byGameId = data.games.find(g => g.gameId === gameId)
+      if (byGameId) return byGameId.total ?? 0
+    }
+    const byTitleId = data.games.find(g => g.titleId === titleId)
+    if (byTitleId) return byTitleId.total ?? 0
     return data.total ?? 0
   }
 }
