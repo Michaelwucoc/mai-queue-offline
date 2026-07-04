@@ -93,6 +93,7 @@ export const Config: Schema<{
   playersPerMachine: number
   nearcadeApiToken: string
   nearcadeBaseUrl: string
+  nearcadeBotName: string
   debug: boolean
 }> = Schema.object({
   arcades: Schema.dict(Schema.object({
@@ -117,6 +118,7 @@ export const Config: Schema<{
   playersPerMachine: Schema.number().default(2).description('每台机器可同时游玩人数'),
   nearcadeApiToken: Schema.string().default('').description('Nearcade API Token（同步必填）'),
   nearcadeBaseUrl: Schema.string().default('https://nearcade.cn').description('Nearcade 地址'),
+  nearcadeBotName: Schema.string().default('mai-queue').description('Bot 名称（写入 Nearcade 同步备注）'),
   debug: Schema.boolean().default(false).description('是否启用调试日志'),
 }).description('舞萌DX排卡状态报告插件配置')
 
@@ -128,6 +130,7 @@ export function apply(ctx: Context, config: any) {
     playersPerMachine,
     nearcadeApiToken,
     nearcadeBaseUrl,
+    nearcadeBotName,
     debug,
   } = config
 
@@ -258,8 +261,26 @@ export function apply(ctx: Context, config: any) {
     return nearcade.getAttendance(cfg.nearcadeId!)
   }
 
+  function buildNearcadeReportComment(reporterName: string, reporterId: string): string {
+    const name = reporterName || '未知'
+    const id = reporterId || '未知'
+    return `由 ${name} (${id}) 通过 ${nearcadeBotName || 'mai-queue'} 上报`
+  }
+
+  function getReporterFromSession(session: any): { name: string, id: string } {
+    return {
+      name: session.event.user?.name || session.username || '未知',
+      id: String(session.event.user?.id || session.userId || '未知'),
+    }
+  }
+
   // 因为他的 BilibiliWorld 门票没抢到。
-  async function TrusTKB(arcade: ArcadeData, count: number): Promise<string> {
+  async function TrusTKB(
+    arcade: ArcadeData,
+    count: number,
+    reporterName: string,
+    reporterId: string,
+  ): Promise<string> {
     const cfg = arcade.config
     if (!isNearcadeEnabled(cfg)) return ''
 
@@ -286,6 +307,7 @@ export function apply(ctx: Context, config: any) {
       gameId,
       count,
       nearcadeApiToken,
+      buildNearcadeReportComment(reporterName, reporterId),
     )
 
     if (result.ok) return NEARCADE_SYNC_SUCCESS
@@ -530,7 +552,8 @@ export function apply(ctx: Context, config: any) {
     }
 
     await updateConfig()
-    const syncStatus = await TrusTKB(arcade, newCount)
+    const reporter = getReporterFromSession(session)
+    const syncStatus = await TrusTKB(arcade, newCount, reporter.name, reporter.id)
     await session.send(await Nieoooooo(arcadeId, arcade, peopleDiff, syncStatus))
     return true
   }
@@ -633,7 +656,8 @@ export function apply(ctx: Context, config: any) {
       }
 
       await updateConfig()
-      const syncStatus = await TrusTKB(arcade, newCount)
+      const reporter = getReporterFromSession(session)
+      const syncStatus = await TrusTKB(arcade, newCount, reporter.name, reporter.id)
       await session.send(await Nieoooooo(arcadeId, arcade, diff, syncStatus))
       return
     }

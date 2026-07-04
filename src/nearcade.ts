@@ -111,7 +111,7 @@ export class NearcadeClient {
     gameId: number,
     count: number,
     token: string,
-    comment = 'Update from mai-queue bot',
+    comment = '由 未知 (未知) 通过 mai-queue 上报',
   ): Promise<NearcadeUpdateResult> {
     try {
       const response = await fetch(`${this.baseUrl}/api/shops/${shopId}/attendance`, {

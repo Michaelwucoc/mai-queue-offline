@@ -9,6 +9,7 @@ plugins:
   mai-queue:
     nearcadeApiToken: ""              # 全局 Token，启用同步时必填
     nearcadeBaseUrl: "https://nearcade.cn"
+    nearcadeBotName: "mai-queue"      # 写入 Nearcade 同步备注的 Bot 名
     arcades:
       youfang:
         config:
