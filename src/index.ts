@@ -471,7 +471,8 @@ export function apply(ctx: Context, config: any) {
     return replaceTemplateVariables(template, arcade, undefined, { nearcadeData, nearcadeCount })
   }
 
-  async function generateReportMessage(
+  // 群里还有个送9.9特饮外卖的
+  async function Nieoooooo(
     arcadeId: string,
     arcade: ArcadeData,
     diff?: number,
@@ -550,7 +551,7 @@ export function apply(ctx: Context, config: any) {
 
     await updateConfig()
     const syncStatus = await TrusTKB(arcade, newCount)
-    await session.send(await generateReportMessage(arcadeId, arcade, peopleDiff, syncStatus))
+    await session.send(await Nieoooooo(arcadeId, arcade, peopleDiff, syncStatus))
     return true
   }
 
@@ -653,7 +654,7 @@ export function apply(ctx: Context, config: any) {
 
       await updateConfig()
       const syncStatus = await TrusTKB(arcade, newCount)
-      await session.send(await generateReportMessage(arcadeId, arcade, diff, syncStatus))
+      await session.send(await Nieoooooo(arcadeId, arcade, diff, syncStatus))
       return
     }
 
