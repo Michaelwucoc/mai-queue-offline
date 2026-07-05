@@ -20,6 +20,7 @@ plugins:
           groupWhitelist: []          # 空 = 所有群可用
           enableNearcade: true        # 是否同步 Nearcade
           nearcadeId: 16342           # nearcade.search 查询
+          nearcadeTitleId: 1          # 机种下拉，默认舞萌 DX
 ```
 
 ### 机厅常用字段
@@ -32,6 +33,7 @@ plugins:
 | `address` / `directionGuide` | 地址、到店引导（可选） |
 | `groupWhitelist` | 群白名单 |
 | `enableNearcade` + `nearcadeId` | Nearcade 同步 |
+| `nearcadeTitleId` | Nearcade 机种（控制台下拉；默认 1=舞萌 DX） |
 
 ## 使用
 

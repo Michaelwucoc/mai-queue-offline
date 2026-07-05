@@ -29,6 +29,7 @@ plugins:
           groupWhitelist: []
           enableNearcade: true
           nearcadeId: 16342
+          nearcadeTitleId: 1            # 控制台可选机种，默认舞萌 DX
 
       liehuo:
         config:

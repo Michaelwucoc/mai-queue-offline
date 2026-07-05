@@ -6,12 +6,18 @@ import {
   NearcadeAttendanceResponse,
   NearcadeClient,
 } from './nearcade'
+import {
+  NEARCADE_DEFAULT_TITLE_ID,
+  NEARCADE_GAME_TITLES,
+  NearcadeTitleId,
+  getNearcadeTitleName,
+  isKnownNearcadeTitleId,
+} from './nearcade-titles'
 
 export const name = 'mai-queue'
 
 const NEARCADE_SYNC_SUCCESS = '已同步到 Nearcade NET.'
 const NEARCADE_SYNC_FAILURE = '暂时无法连接到 Nearcade NET.'
-const NEARCADE_MAIMAI_TITLE_ID = 1
 
 const defaultQueryTemplate = `→ OK！查到了！
 
@@ -62,6 +68,7 @@ export interface ArcadeConfig {
   reportMessageTemplate?: string
   enableNearcade?: boolean
   nearcadeId?: number
+  nearcadeTitleId?: NearcadeTitleId
   enableCoupleReport?: boolean
   coupleGroupWhitelist?: string[]
 }
@@ -95,16 +102,7 @@ interface EffectiveCountResult {
   nearcadeCount: number | null
 }
 
-export const Config: Schema<{
-  arcades: Record<string, { config: ArcadeConfig }>
-  defaultMachineCount: number
-  defaultPlayTimePerPerson: number
-  playersPerMachine: number
-  nearcadeApiToken: string
-  nearcadeBaseUrl: string
-  nearcadeBotName: string
-  debug: boolean
-}> = Schema.object({
+export const Config = Schema.object({
   arcades: Schema.dict(Schema.object({
     config: Schema.object({
       name: Schema.string().required().description('机厅名称'),
@@ -118,6 +116,9 @@ export const Config: Schema<{
       reportMessageTemplate: Schema.string().role('textarea').default(defaultReportTemplate).description('上报消息模板'),
       enableNearcade: Schema.boolean().default(false).description('同步到 Nearcade'),
       nearcadeId: Schema.number().default(0).description('Nearcade 机厅 ID（nearcade.search 查询）'),
+      nearcadeTitleId: Schema.union(
+        NEARCADE_GAME_TITLES.map(({ id, name }) => Schema.const(id).description(name)),
+      ).default(NEARCADE_DEFAULT_TITLE_ID).description('Nearcade 机种'),
       enableCoupleReport: Schema.boolean().default(false).description('是否启用小情侣报卡'),
       coupleGroupWhitelist: Schema.array(Schema.string()).default([]).description('小情侣报卡绑定群号列表'),
     }).description('机厅配置'),
@@ -264,6 +265,21 @@ export function apply(ctx: Context, config: any) {
     return !!(config.enableNearcade && config.nearcadeId && config.nearcadeId > 0)
   }
 
+  function getArcadeTitleId(config: ArcadeConfig): number {
+    const id = config.nearcadeTitleId
+    if (id && id > 0 && isKnownNearcadeTitleId(id)) return id
+    return NEARCADE_DEFAULT_TITLE_ID
+  }
+
+  async function resolveArcadeGameId(config: ArcadeConfig): Promise<number | null> {
+    return nearcade.resolveGameId(
+      config.nearcadeId!,
+      getArcadeTitleId(config),
+      config.name,
+      config.aliases,
+    )
+  }
+
   async function fetchNearcadeAttendance(arcade: ArcadeData): Promise<NearcadeAttendanceResponse | null> {
     const cfg = arcade.config
     if (!isNearcadeEnabled(cfg)) return null
@@ -298,16 +314,10 @@ export function apply(ctx: Context, config: any) {
       return NEARCADE_SYNC_FAILURE
     }
 
-    const titleId = NEARCADE_MAIMAI_TITLE_ID
-    const gameId = await nearcade.resolveGameId(
-      cfg.nearcadeId!,
-      titleId,
-      cfg.name,
-      cfg.aliases,
-    )
+    const gameId = await resolveArcadeGameId(cfg)
 
     if (!gameId) {
-      ctx.logger('mai-queue').warn(`Nearcade 机种解析失败: ${cfg.name} (id=${cfg.nearcadeId}, titleId=${titleId})`)
+      ctx.logger('mai-queue').warn(`Nearcade 机种解析失败: ${cfg.name} (id=${cfg.nearcadeId}, ${getNearcadeTitleName(getArcadeTitleId(cfg))})`)
       return NEARCADE_SYNC_FAILURE
     }
 
@@ -357,16 +367,11 @@ export function apply(ctx: Context, config: any) {
   async function resolveNearcadeCount(arcade: ArcadeData, data: NearcadeAttendanceResponse | null): Promise<number | null> {
     if (!data || !isNearcadeEnabled(arcade.config)) return null
     const cfg = arcade.config
-    const titleId = NEARCADE_MAIMAI_TITLE_ID
+    const titleId = getArcadeTitleId(cfg)
     const fromAttendance = nearcade.resolveAttendanceCount(data, titleId)
     if (fromAttendance !== null) return fromAttendance
 
-    const gameId = await nearcade.resolveGameId(
-      cfg.nearcadeId!,
-      titleId,
-      cfg.name,
-      cfg.aliases,
-    )
+    const gameId = await resolveArcadeGameId(cfg)
     return nearcade.resolveAttendanceCount(data, titleId, gameId)
   }
 
@@ -426,7 +431,7 @@ export function apply(ctx: Context, config: any) {
       diffStr = diff > 0 ? `+${diff}` : `${diff}`
     }
 
-    const titleId = NEARCADE_MAIMAI_TITLE_ID
+    const titleId = getArcadeTitleId(config)
     const nearcadeCount = extras.nearcadeCount ?? (
       extras.nearcadeData
         ? nearcade.getAttendanceCount(extras.nearcadeData, titleId)
@@ -623,7 +628,8 @@ export function apply(ctx: Context, config: any) {
         lines.push(`- ${shop.name}`)
         lines.push(`  nearcadeId: ${shop.id}`)
         for (const game of shop.games || []) {
-          lines.push(`  · ${game.name} (titleId=${game.titleId}, gameId=${game.gameId})`)
+          const titleName = getNearcadeTitleName(game.titleId)
+          lines.push(`  · ${game.name} — ${titleName} (titleId=${game.titleId}, gameId=${game.gameId})`)
         }
       }
       return lines.join('\n')
