@@ -83,7 +83,16 @@ export interface ArcadeData {
 interface TemplateExtras {
   nearcadeData?: NearcadeAttendanceResponse | null
   nearcadeSyncStatus?: string
-  nearcadeCount?: number
+  nearcadeCount?: number | null
+  effectiveCount?: number
+  countFromNearcade?: boolean
+}
+
+interface EffectiveCountResult {
+  count: number
+  fromNearcade: boolean
+  nearcadeData: NearcadeAttendanceResponse | null
+  nearcadeCount: number | null
 }
 
 export const Config: Schema<{
@@ -317,21 +326,22 @@ export function apply(ctx: Context, config: any) {
   }
 
   // u方招财猫叛变成 xj工具人了。
-  function indetheus(arcade: ArcadeData): number {
-    const currentCount = arcade.status.currentCount
-    const machineCount = arcade.config.machineCount || defaultMachineCount
+  function indetheusForCount(currentCount: number, machineCount: number): number {
     const totalCapacity = machineCount * playersPerMachine
-
     if (currentCount <= totalCapacity) return 0
-
     const queueLength = currentCount - totalCapacity
     const roundsNeeded = Math.ceil(queueLength / totalCapacity)
     return roundsNeeded * defaultPlayTimePerPerson
   }
 
-  function calculateNextPlayTime(arcade: ArcadeData): number | null {
+  function indetheus(arcade: ArcadeData, count = arcade.status.currentCount): number {
+    const machineCount = arcade.config.machineCount || defaultMachineCount
+    return indetheusForCount(count, machineCount)
+  }
+
+  function calculateNextPlayTime(arcade: ArcadeData, count = arcade.status.currentCount): number | null {
     if (!arcade.status.lastPlayTime) return null
-    return indetheus(arcade) + defaultPlayTimePerPerson
+    return indetheusForCount(count, arcade.config.machineCount || defaultMachineCount) + defaultPlayTimePerPerson
   }
 
   function formatDateTime(date: Date): string {
@@ -344,17 +354,42 @@ export function apply(ctx: Context, config: any) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
   }
 
-  async function resolveNearcadeCount(arcade: ArcadeData, data: NearcadeAttendanceResponse | null): Promise<number> {
-    if (!data || !isNearcadeEnabled(arcade.config)) return 0
+  async function resolveNearcadeCount(arcade: ArcadeData, data: NearcadeAttendanceResponse | null): Promise<number | null> {
+    if (!data || !isNearcadeEnabled(arcade.config)) return null
     const cfg = arcade.config
     const titleId = NEARCADE_MAIMAI_TITLE_ID
+    const fromAttendance = nearcade.resolveAttendanceCount(data, titleId)
+    if (fromAttendance !== null) return fromAttendance
+
     const gameId = await nearcade.resolveGameId(
       cfg.nearcadeId!,
       titleId,
       cfg.name,
       cfg.aliases,
     )
-    return nearcade.getAttendanceCount(data, titleId, gameId)
+    return nearcade.resolveAttendanceCount(data, titleId, gameId)
+  }
+
+  async function resolveEffectiveCount(arcade: ArcadeData): Promise<EffectiveCountResult> {
+    const localCount = arcade.status.currentCount
+    if (!isNearcadeEnabled(arcade.config)) {
+      return { count: localCount, fromNearcade: false, nearcadeData: null, nearcadeCount: null }
+    }
+
+    const nearcadeData = await fetchNearcadeAttendance(arcade)
+    if (!nearcadeData) {
+      logDebug(`Nearcade 拉取失败，使用本地人数: ${arcade.config.name}`)
+      return { count: localCount, fromNearcade: false, nearcadeData: null, nearcadeCount: null }
+    }
+
+    const nearcadeCount = await resolveNearcadeCount(arcade, nearcadeData)
+    if (nearcadeCount === null) {
+      logDebug(`Nearcade 无出勤数据，使用本地人数: ${arcade.config.name}`)
+      return { count: localCount, fromNearcade: false, nearcadeData, nearcadeCount: null }
+    }
+
+    logDebug(`Nearcade 人数 ${nearcadeCount}，本地 ${localCount}: ${arcade.config.name}`)
+    return { count: nearcadeCount, fromNearcade: true, nearcadeData, nearcadeCount }
   }
 
   function buildNearcadeLink(config: ArcadeConfig): string {
@@ -369,8 +404,9 @@ export function apply(ctx: Context, config: any) {
     extras: TemplateExtras = {},
   ): string {
     const { config, status } = arcade
-    const waitTime = indetheus(arcade)
-    const nextPlayTime = calculateNextPlayTime(arcade)
+    const displayCount = extras.effectiveCount ?? status.currentCount
+    const waitTime = indetheus(arcade, displayCount)
+    const nextPlayTime = calculateNextPlayTime(arcade, displayCount)
 
     let updateTimeStr = '未知'
     let minutesAgo = 0
@@ -391,8 +427,13 @@ export function apply(ctx: Context, config: any) {
     }
 
     const titleId = NEARCADE_MAIMAI_TITLE_ID
-    const nearcadeCount = extras.nearcadeCount ?? nearcade.getAttendanceCount(extras.nearcadeData ?? null, titleId)
-    const nearcadeDiff = status.currentCount - nearcadeCount
+    const nearcadeCount = extras.nearcadeCount ?? (
+      extras.nearcadeData
+        ? nearcade.getAttendanceCount(extras.nearcadeData, titleId)
+        : null
+    )
+    const nearcadeCountDisplay = nearcadeCount ?? 0
+    const nearcadeDiff = status.currentCount - nearcadeCountDisplay
     const nearcadeDiffStr = nearcadeDiff > 0 ? `+${nearcadeDiff}` : `${nearcadeDiff}`
     const nearcadeLink = buildNearcadeLink(config)
     const nearcadeSyncStatus = extras.nearcadeSyncStatus || ''
@@ -400,7 +441,7 @@ export function apply(ctx: Context, config: any) {
 
     let message = template
     message = message.replace(/\{name\}/g, config.name)
-    message = message.replace(/\{currentCount\}/g, status.currentCount.toString())
+    message = message.replace(/\{currentCount\}/g, displayCount.toString())
     message = message.replace(/\{machineCount\}/g, (config.machineCount || defaultMachineCount).toString())
     message = message.replace(/\{updateTime\}/g, updateTimeStr)
     message = message.replace(/\{updaterName\}/g, status.updaterName || '未知')
@@ -414,7 +455,7 @@ export function apply(ctx: Context, config: any) {
     message = message.replace(/\{minutesAgo\}/g, status.updateTime ? minutesAgo.toString() : '')
     message = message.replace(/\{diff\}/g, diffStr)
     message = message.replace(/\{xql_num\}/g, (status.coupleCount || 0).toString())
-    message = message.replace(/\{nearcadeCount\}/g, isNearcadeEnabled(config) ? nearcadeCount.toString() : '0')
+    message = message.replace(/\{nearcadeCount\}/g, isNearcadeEnabled(config) && nearcadeCount !== null ? nearcadeCountDisplay.toString() : '0')
     message = message.replace(/\{nearcadeTotal\}/g, isNearcadeEnabled(config) ? nearcadeTotal.toString() : '0')
     message = message.replace(/\{nearcadeDiff\}/g, isNearcadeEnabled(config) ? nearcadeDiffStr : '0')
     message = message.replace(/\{nearcadeLink\}/g, nearcadeLink)
@@ -466,10 +507,14 @@ export function apply(ctx: Context, config: any) {
   }
 
   async function generateQueryMessage(arcadeId: string, arcade: ArcadeData): Promise<string> {
-    const nearcadeData = await fetchNearcadeAttendance(arcade)
-    const nearcadeCount = await resolveNearcadeCount(arcade, nearcadeData)
+    const effective = await resolveEffectiveCount(arcade)
     const template = arcade.config.queryMessageTemplate || defaultQueryTemplate
-    return replaceTemplateVariables(template, arcade, undefined, { nearcadeData, nearcadeCount })
+    return replaceTemplateVariables(template, arcade, undefined, {
+      nearcadeData: effective.nearcadeData,
+      nearcadeCount: effective.nearcadeCount,
+      effectiveCount: effective.count,
+      countFromNearcade: effective.fromNearcade,
+    })
   }
 
   // 群里还有个送9.9特饮外卖的
@@ -479,10 +524,15 @@ export function apply(ctx: Context, config: any) {
     diff?: number,
     nearcadeSyncStatus = '',
   ): Promise<string> {
-    const nearcadeData = await fetchNearcadeAttendance(arcade)
-    const nearcadeCount = await resolveNearcadeCount(arcade, nearcadeData)
+    const effective = await resolveEffectiveCount(arcade)
     const template = arcade.config.reportMessageTemplate || defaultReportTemplate
-    return replaceTemplateVariables(template, arcade, diff, { nearcadeData, nearcadeCount, nearcadeSyncStatus })
+    return replaceTemplateVariables(template, arcade, diff, {
+      nearcadeData: effective.nearcadeData,
+      nearcadeCount: effective.nearcadeCount,
+      nearcadeSyncStatus,
+      effectiveCount: effective.count,
+      countFromNearcade: effective.fromNearcade,
+    })
   }
 
   function parseReportCommand(text: string): { alias: string, operation: 'set' | 'add' | 'subtract', value: number } | null {

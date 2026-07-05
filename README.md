@@ -48,6 +48,8 @@ nearcade.search 悠方   # 管理员：查机厅 ID
 
 Nearcade：`{nearcadeCount}` `{nearcadeDiff}` `{nearcadeLink}` `{nearcadeSyncStatus}`
 
+启用 Nearcade 时，`{currentCount}` 优先取平台人数；拉取失败或无数据时回退本地。
+
 同步成功 → `已同步到 Nearcade NET.`；失败 → `暂时无法连接到 Nearcade NET.`
 
 ## 开发

@@ -185,13 +185,27 @@ export class NearcadeClient {
   }
 
   getAttendanceCount(data: NearcadeAttendanceResponse | null, titleId: number, gameId?: number | null): number {
-    if (!data?.games?.length) return 0
-    if (gameId) {
+    const resolved = this.resolveAttendanceCount(data, titleId, gameId)
+    return resolved ?? 0
+  }
+
+  /** 从出勤响应解析人数；无法匹配机种时返回 null（表示无数据） */
+  resolveAttendanceCount(
+    data: NearcadeAttendanceResponse | null,
+    titleId: number,
+    gameId?: number | null,
+  ): number | null {
+    if (!data) return null
+    if (gameId && data.games?.length) {
       const byGameId = data.games.find(g => g.gameId === gameId)
       if (byGameId) return byGameId.total ?? 0
     }
-    const byTitleId = data.games.find(g => g.titleId === titleId)
-    if (byTitleId) return byTitleId.total ?? 0
-    return data.total ?? 0
+    if (data.games?.length) {
+      const byTitleId = data.games.find(g => g.titleId === titleId)
+      if (byTitleId) return byTitleId.total ?? 0
+    }
+    if (typeof data.total === 'number' && data.total > 0) return data.total
+    if (!data.games?.length && (!data.reported || data.reported.length === 0)) return null
+    return 0
   }
 }
