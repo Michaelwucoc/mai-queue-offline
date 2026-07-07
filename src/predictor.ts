@@ -49,6 +49,16 @@ interface HistoryFileData {
 const MAX_EVENTS_PER_ARCADE = 1000
 const EMA_ALPHA = 0.12
 const MIN_SAMPLES_FOR_MODEL = 3
+/** 舞萌DX 单轮时长：1P 约 14 分钟，2P 约 17 分钟 */
+const ROUND_MINUTES_1P = 14
+const ROUND_MINUTES_2P = 17
+/** 空闲时平均每台 1P/2P 混合人数下限；拥挤时趋近 2（小情侣/拼机变多） */
+const GROUP_SIZE_MIN = 1.3
+/** 「打完不报」衰减时间常数（分钟）：上报越陈旧，队列有效人数越低 */
+const UNREPORTED_DECAY_MINUTES = 90
+/** 单次游玩时长学习上限（防止稀疏上报拉长间隔） */
+const PLAY_SAMPLE_MAX_MINUTES = 22
+const PLAY_ELAPSED_MAX_MINUTES = 45
 export const DEFAULT_FORECAST_HOURS = 8
 export const DEFAULT_FORECAST_STEP_MINUTES = 30
 export const DEFAULT_HISTORY_HOURS = 24
@@ -286,8 +296,9 @@ export class ArcadePredictor {
     for (let i = currentIdx - 1; i >= 0; i--) {
       if (events[i].count >= targetCount) {
         const elapsed = (new Date(timestamp).getTime() - new Date(events[i].timestamp).getTime()) / 60000
-        if (elapsed > 1 && elapsed < 180) {
-          this.applyPlayTimeSample(model, elapsed / peopleLeft)
+        if (elapsed > 1 && elapsed < PLAY_ELAPSED_MAX_MINUTES) {
+          const perPerson = Math.min(PLAY_SAMPLE_MAX_MINUTES, elapsed / peopleLeft)
+          this.applyPlayTimeSample(model, perPerson)
         }
         break
       }
@@ -526,32 +537,59 @@ export class ArcadePredictor {
     this.updateDepartureRateOnEvents(arcade.events, arcade.model, peopleLeft, timestamp)
   }
 
+  /**
+   * 舞萌DX 单轮周转模型。
+   * 拥挤度 crowd ∈ [0,1] 提升时：单轮时长 14→17 分钟（2P 占比升高），
+   * 每台每轮平均消化人数 1.3→2.0。
+   */
+  private maimaiRoundModel(queue: number, capacity: number) {
+    const crowd = Math.min(1, Math.max(0, queue / Math.max(1, capacity)))
+    const roundMinutes = ROUND_MINUTES_1P + (ROUND_MINUTES_2P - ROUND_MINUTES_1P) * crowd
+    const groupSize = GROUP_SIZE_MIN + (2 - GROUP_SIZE_MIN) * crowd
+    return { crowd, roundMinutes, groupSize }
+  }
+
+  /** 「打完不报」修正：距上次上报越久，排队人数按指数衰减越多 */
+  private staleQueueFactor(minutesSinceUpdate: number): number {
+    if (minutesSinceUpdate <= 5) return 1
+    return Math.exp(-(minutesSinceUpdate - 5) / UNREPORTED_DECAY_MINUTES)
+  }
+
   private formulaWaitTime(
     currentCount: number,
     machineCount: number,
     playersPerMachine: number,
-    playMinutes: number,
+    minutesSinceUpdate = 0,
   ): number {
     const totalCapacity = machineCount * playersPerMachine
     if (currentCount <= totalCapacity) return 0
-    const queueLength = currentCount - totalCapacity
-    const roundsNeeded = Math.ceil(queueLength / totalCapacity)
-    return roundsNeeded * playMinutes
+
+    // 有效队列 = 报数超额 × 陈旧度衰减（有人打完直接走没报数）
+    const rawQueue = currentCount - totalCapacity
+    const queue = rawQueue * this.staleQueueFactor(minutesSinceUpdate)
+    if (queue < 0.5) return 0
+
+    const { roundMinutes, groupSize } = this.maimaiRoundModel(queue, totalCapacity)
+
+    // 每轮全场吞吐 = 机台数 × 每台混合人数；机台错峰结束，平均再等 0.45 轮
+    const throughputPerRound = machineCount * groupSize
+    const roundsAhead = queue / throughputPerRound
+    return Math.round(roundMinutes * (roundsAhead + 0.45))
   }
 
   private simulationWaitTime(
     currentCount: number,
     capacity: number,
     model: ArcadePredictionModel,
-    defaultPlayMinutes: number,
+    formulaWait: number,
+    minutesSinceUpdate = 0,
   ): number | null {
-    const playMinutes = model.avgPlayMinutes > 0 ? model.avgPlayMinutes : defaultPlayMinutes
-    const serviceRate = model.avgDepartureRate > 0
-      ? model.avgDepartureRate
-      : (capacity / Math.max(playMinutes / 60, 0.1))
     if (currentCount <= capacity) return 0
-    const queue = currentCount - capacity
-    return Math.round((queue / serviceRate) * 60)
+    if (model.avgDepartureRate <= 0) return null
+    const queue = (currentCount - capacity) * this.staleQueueFactor(minutesSinceUpdate)
+    const raw = Math.round((queue / model.avgDepartureRate) * 60)
+    // 仿真不应显著高于公式（稀疏上报常低估离场速率）
+    return Math.min(raw, Math.round(formulaWait * 1.15 + 3))
   }
 
   getPlayMinutes(arcadeId: string, defaultPlayMinutes: number): number {
@@ -605,26 +643,32 @@ export class ArcadePredictor {
     defaultPlayMinutes: number,
     hasLastPlayTime: boolean,
     ctx: PredictorContext = {},
+    minutesSinceUpdate = 0,
   ): WaitTimePrediction {
     const arcade = this.ensureArcade(arcadeId)
     const model = arcade.model
     const resolved = this.getContext({ ...ctx, machineCount, playersPerMachine })
     const capacity = machineCount * playersPerMachine
     const fromModel = model.sampleCount >= MIN_SAMPLES_FOR_MODEL && model.avgPlayMinutes > 0
-    const playMinutes = fromModel ? model.avgPlayMinutes : defaultPlayMinutes
     const now = new Date()
 
-    const formulaWait = this.formulaWaitTime(currentCount, machineCount, playersPerMachine, playMinutes)
-    const simWait = this.simulationWaitTime(currentCount, capacity, model, defaultPlayMinutes)
+    const formulaWait = this.formulaWaitTime(currentCount, machineCount, playersPerMachine, minutesSinceUpdate)
+    const simWait = this.simulationWaitTime(currentCount, capacity, model, formulaWait, minutesSinceUpdate)
 
     let waitMinutes = formulaWait
-    let method = '公式估算'
+    let method = '舞萌周转模型'
     if (simWait !== null && model.avgDepartureRate > 0) {
-      waitMinutes = Math.round(formulaWait * 0.35 + simWait * 0.65)
-      method = '队列仿真 + 时段模型'
+      // 周转公式更贴近舞萌体感，离场速率仿真仅作辅助
+      waitMinutes = Math.round(formulaWait * 0.75 + simWait * 0.25)
+      method = '舞萌周转 + 队列仿真'
     } else if (fromModel) {
-      method = '历史学习 + 时段模型'
+      method = '舞萌周转 + 时段模型'
     }
+
+    // 软上限：常态排队约一轮多（≤22 分钟），深度排队缓慢递增
+    const excessRounds = Math.max(0, Math.ceil((currentCount - capacity) / capacity) - 1)
+    const softCap = 22 + excessRounds * 5
+    waitMinutes = Math.min(waitMinutes, softCap)
 
     const profileValue = this.getHourProfileValue(model, now)
     let peakHourHint: string | undefined
@@ -636,8 +680,13 @@ export class ArcadePredictor {
       }
     }
 
+    // 下次上机 = 排队等待 + 一轮游玩（按当前拥挤度取 14–17 分钟）
+    const { roundMinutes } = this.maimaiRoundModel(
+      Math.max(0, currentCount - capacity),
+      capacity,
+    )
     const nextPlayMinutes = hasLastPlayTime
-      ? waitMinutes + Math.round(playMinutes)
+      ? waitMinutes + Math.round(roundMinutes)
       : null
 
     const confidence = this.calculateConfidence(arcadeId, resolved, fromModel)

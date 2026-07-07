@@ -498,6 +498,14 @@ export function apply(ctx: Context, config: any) {
   }
 
   function getWaitTimePrediction(arcadeId: string, arcade: ArcadeData, count: number) {
+    // 上报陈旧度：距上次报卡越久，越多人可能已打完离开（未报数）
+    let minutesSinceUpdate = 0
+    if (arcade.status.updateTime) {
+      const updated = new Date(arcade.status.updateTime).getTime()
+      if (Number.isFinite(updated)) {
+        minutesSinceUpdate = Math.max(0, (Date.now() - updated) / 60000)
+      }
+    }
     return predictor.predictWaitTime(
       arcadeId,
       count,
@@ -506,6 +514,7 @@ export function apply(ctx: Context, config: any) {
       defaultPlayTimePerPerson,
       !!arcade.status.lastPlayTime,
       buildPredictorContext(arcade),
+      minutesSinceUpdate,
     )
   }
   function formatDateTime(date: Date): string {

@@ -47,7 +47,9 @@ nearcade.search 悠方   # 管理员：查机厅 ID
 
 ## 预测模型
 
-每个机厅独立维护历史队列数据（`data/mai-queue-history.yml`），在群友报卡时自动学习：
+每个机厅独立维护历史队列数据（`data/mai-queue-history.yml`），在群友报卡时自动学习。算法细节见 **[docs/PREDICTION_ALGORITHM.md](docs/PREDICTION_ALGORITHM.md)**（含公式、数据质量、等待时间与人数预测、图表断轴等完整说明）。
+
+概要：
 
 - **队列仿真**：根据到达/离开速率估算等待时间
 - **线性回归 + 周中/周末时段模型**：分日类型学习 24 小时画像，预测未来 8 小时（每 30 分钟一个点）
