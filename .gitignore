@@ -5,6 +5,5 @@ lib/
 *.tsbuildinfo
 .env
 .env.local
-
-
+data/test-sandbox/
 

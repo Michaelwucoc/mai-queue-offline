@@ -38,17 +38,47 @@ plugins:
 ## 使用
 
 ```
-yf1      # 设为 1 人
-yf+1     # 加 1 人
-yf几     # 查询
+yf1          # 设为 1 人
+yf+1         # 加 1 人
+yf几         # 查询
+predict yf   # 预测等待时间与人数趋势（含趋势图）
 nearcade.search 悠方   # 管理员：查机厅 ID
 ```
 
+## 预测模型
+
+每个机厅独立维护历史队列数据（`data/mai-queue-history.yml`），在群友报卡时自动学习：
+
+- **队列仿真**：根据到达/离开速率估算等待时间
+- **线性回归 + 周中/周末时段模型**：分日类型学习 24 小时画像，预测未来 8 小时（每 30 分钟一个点）
+- **时段模式**：按小时统计历史均值，识别高峰/低谷
+- **Nearcade 融合**：从 `GET /api/shops/{id}/attendance` 的 `reported` 字段导入当日上报记录（MongoDB 全量历史暂无公开 API）
+
+`predict <别名>` 会发送逐时预测表 + 推荐出勤时段 + 趋势图。结果含「仅供参考」说明。
+
+```yaml
+forecastHours: 8          # 预测时长（小时）
+forecastStepMinutes: 30   # 采样密度（分钟）
+```
+
+### 页脚（可选，默认关闭）
+
+```yaml
+enableMessageFooter: true
+messageFooter: "Made By Milk with ❤️ | awmc.cc | v2.1.0"
+```
+
+模板中使用 `{footer}` 占位；`enableMessageFooter` 默认为 `false`，不影响旧配置。
+
 ## 模板变量
 
-基础：`{name}` `{currentCount}` `{waitTime}` `{notice}` `{address}` `{directionGuide}` 等
+基础：`{name}` `{displayName}` `{gameTitle}` `{currentCount}` `{waitTime}` `{notice}` `{footer}` 等
+
+预测：`{confidence}` `{forecastHours}` `{forecastSchedule}` `{forecastRecommendation}` `{predictedCount}` `{predictedRange}` `{trendDesc}` `{predictionMethod}` `{nearcadeDataPoints}` `{avgPlayMinutes}`
 
 Nearcade：`{nearcadeCount}` `{nearcadeDiff}` `{nearcadeLink}` `{nearcadeSyncStatus}`
+
+每台机厅可单独配置 `queryMessageTemplate`、`reportMessageTemplate`、`predictMessageTemplate`。
 
 启用 Nearcade 时，`{currentCount}` 优先取平台人数；拉取失败或无数据时回退本地。
 

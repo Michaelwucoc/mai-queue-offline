@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-mai-queue",
-  "version": "2.0.8",
+  "version": "3.0.0",
   "description": "舞萌DX排卡状态报告插件",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "dev": "tsc -b --watch"
+    "dev": "tsc -b --watch",
+    "test:predict": "npm run build && node scripts/test-predict.js"
   },
   "keywords": [
     "koishi",
@@ -24,6 +25,7 @@
     "koishi": "^4.0.0"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "yaml": "^2.8.2"
   },
   "devDependencies": {

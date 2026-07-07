@@ -24,12 +24,21 @@ export interface NearcadeAttendanceGame {
   total: number
 }
 
+export interface NearcadeReportedEntry {
+  gameId: number
+  currentAttendances: number
+  reportedBy?: string
+  reportedAt: string
+  comment?: string | null
+  reporter?: unknown
+}
+
 export interface NearcadeAttendanceResponse {
   success: boolean
   total: number
   games: NearcadeAttendanceGame[]
   registered: unknown[]
-  reported: unknown[]
+  reported: NearcadeReportedEntry[]
 }
 
 export interface NearcadeUpdateResult {
@@ -88,18 +97,23 @@ export class NearcadeClient {
   /** GET /api/shops/{id}/attendance — 见 https://nearcade.apifox.cn */
   async getAttendance(
     shopId: number,
-    reported?: boolean,
+    options?: { reported?: boolean, registered?: boolean },
   ): Promise<NearcadeAttendanceResponse | null> {
     try {
       const params = new URLSearchParams()
-      if (reported !== undefined) {
-        params.set('reported', reported ? 'true' : 'false')
+      if (options?.reported !== undefined) {
+        params.set('reported', options.reported ? 'true' : 'false')
+      }
+      if (options?.registered !== undefined) {
+        params.set('registered', options.registered ? 'true' : 'false')
       }
       const query = params.toString()
       const url = `${this.baseUrl}/api/shops/${shopId}/attendance${query ? `?${query}` : ''}`
       const response = await fetch(url)
       if (!response.ok) return null
-      return await response.json() as NearcadeAttendanceResponse
+      const data = await response.json() as NearcadeAttendanceResponse
+      if (!Array.isArray(data.reported)) data.reported = []
+      return data
     } catch {
       return null
     }
@@ -207,5 +221,18 @@ export class NearcadeClient {
     if (typeof data.total === 'number' && data.total > 0) return data.total
     if (!data.games?.length && (!data.reported || data.reported.length === 0)) return null
     return 0
+  }
+
+  extractReportHistory(
+    data: NearcadeAttendanceResponse | null,
+    titleId: number,
+    gameId?: number | null,
+  ): NearcadeReportedEntry[] {
+    if (!data?.reported?.length) return []
+    const targetGameId = gameId ?? data.games?.find(g => g.titleId === titleId)?.gameId
+    if (!targetGameId) return []
+    return data.reported
+      .filter(entry => entry.gameId === targetGameId && entry.reportedAt)
+      .sort((a, b) => new Date(a.reportedAt).getTime() - new Date(b.reportedAt).getTime())
   }
 }
