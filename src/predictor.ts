@@ -555,6 +555,22 @@ export class ArcadePredictor {
     return Math.exp(-(minutesSinceUpdate - 5) / UNREPORTED_DECAY_MINUTES)
   }
 
+  /**
+   * 深夜收尾系数：越接近闭店/午夜人数锐减。
+   * - 最后一个营业小时（如 23:00–23:59）：1 → 0.5 线性收尾
+   * - 闭店宽容期（如 00:00 后）：0.5 · (1-γ)^1.5 陡降至 0
+   */
+  private lateNightFactor(date: Date, hours: OperatingHours): number {
+    const grace = getGraceProgress(date, hours)
+    if (grace !== null) {
+      return 0.5 * Math.pow(1 - grace, 1.5)
+    }
+    if (isOperatingHour(date, hours) && date.getHours() === hours.closeHour) {
+      return 1 - 0.5 * (date.getMinutes() / 60)
+    }
+    return 1
+  }
+
   private formulaWaitTime(
     currentCount: number,
     machineCount: number,
@@ -788,11 +804,8 @@ export class ArcadePredictor {
     const regressionWeight = 1 - profileWeight
     let blended = regressionWeight * regressionPred + profileWeight * profilePred
 
-    // 闭店宽容期内人数随时间线性衰减至 0（延迟打烊，人越来越少）
-    const graceProgress = getGraceProgress(futureDate, resolved.operatingHours)
-    if (graceProgress !== null) {
-      blended *= 1 - graceProgress
-    }
+    // 深夜收尾：最后一小时线性收尾，午夜后（宽容期）陡降至 0
+    blended *= this.lateNightFactor(futureDate, resolved.operatingHours)
 
     // 钳制到合理人数上限，防止外推爆表
     const cap = this.maxReasonableCount(resolved)
@@ -841,8 +854,8 @@ export class ArcadePredictor {
       let predictedCount = smoothed[i - 1]
       if (!isOperatingOrGrace(futureDate, resolved.operatingHours)) {
         predictedCount = 0
-      } else if (getGraceProgress(futureDate, resolved.operatingHours) !== null) {
-        // 宽容期内取平滑值与衰减值中较小者，保证向 0 收敛
+      } else if (this.lateNightFactor(futureDate, resolved.operatingHours) < 1) {
+        // 收尾/宽容期取平滑值与衰减值中较小者，保证向 0 收敛
         predictedCount = Math.min(predictedCount, point.predictedCount)
       }
       const margin = Math.max(1, point.upperBound - point.predictedCount)

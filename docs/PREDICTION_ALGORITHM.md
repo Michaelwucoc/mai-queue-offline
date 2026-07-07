@@ -306,15 +306,30 @@ w_p = \begin{cases}
 \hat{N}_{\text{blend}} = (1 - w_p)\,\hat{N}_{\text{reg}} + w_p\,\hat{N}_{\text{prof}}
 \]
 
-### 6.4 营业与宽容修正
+### 6.4 深夜收尾修正
 
-- 若 \(t_0+\tau\) 不在 `isOperatingOrGrace` 内：\(\hat{N} = 0\)
-- 若在宽容期：\(\hat{N}_{\text{blend}} \leftarrow \hat{N}_{\text{blend}} \cdot (1 - \gamma(t))\)
-- 钳制：\(\hat{N} \leftarrow \min(\hat{N}, N_{\max})\)，再取 \(\max(0, \text{round}(\cdot))\)
+经验规律：**越接近深夜闭店，人数锐减，午夜后基本无人**。定义收尾系数 \(\eta(t)\)：
+
+\[
+\eta(t) = \begin{cases}
+1 & \text{正常营业时段} \\[4pt]
+1 - 0.5 \cdot \dfrac{\text{minute}(t)}{60} & \text{最后一个营业小时（如 23:00–23:59，线性收尾至 0.5）} \\[8pt]
+0.5 \cdot (1 - \gamma(t))^{1.5} & \text{闭店宽容期（如 00:00 后，陡降）} \\[4pt]
+0 & \text{宽容期外}
+\end{cases}
+\]
+
+\[
+\hat{N}_{\text{blend}} \leftarrow \hat{N}_{\text{blend}} \cdot \eta(t)
+\]
+
+**示例**（23 点闭店、宽容 90 分钟，当前 23:05 报 5 人）：23:35 → ~3 人，00:05 → ~2 人，00:35 → ~1 人，01:05 → 0。
+
+其余钳制：\(\hat{N} \leftarrow \min(\hat{N}, N_{\max})\)，再取 \(\max(0, \text{round}(\cdot))\)。
 
 ### 6.5 序列平滑
 
-对 \(k=1,\ldots,K\) 个未来步长的原始 \(\hat{N}_k\) 做窗口为 3 的移动平均 `smoothSeries`，再与单点衰减取 \(\min\)（宽容期内保证单调向 0）。
+对 \(k=1,\ldots,K\) 个未来步长的原始 \(\hat{N}_k\) 做窗口为 3 的移动平均 `smoothSeries`；凡 \(\eta(t)<1\)（收尾/宽容期）的点，取平滑值与单点衰减值中的较小者，防止平滑把深夜人数抬回去。
 
 默认 \(K = H \times 60 / 30 = 16\)（8 小时、30 分钟步长）。
 
@@ -391,6 +406,7 @@ w_p = \begin{cases}
 | 每台混合人数 | 1.3 → 2.0 | 随拥挤度插值 |
 | 错峰余量 | 0.45 轮 | 机台错峰结束 |
 | 陈旧衰减常数 | 90 分钟 | 未上报离场修正 |
+| 收尾系数 | 1→0.5→0 | 最后营业小时线性、宽容期 \((1-\gamma)^{1.5}\) 陡降 |
 | 公式/仿真融合 | 0.75 / 0.25 | 等待时间 |
 | 等待软上限 | 22 + 5/轮 | 常态 ≤22 分钟 |
 | 画像权重 | 0.15 → 0.80 | 随远期线性增加 |
