@@ -65,10 +65,22 @@ function buildSearchKeywords(shopName?: string, aliases: string[] = []): string[
 
 export class NearcadeClient {
   private readonly baseUrl: string
+  private readonly requestTimeoutMs: number
   private readonly gameIdCache = new Map<string, number>()
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, requestTimeoutMs = 5000) {
     this.baseUrl = normalizeBaseUrl(baseUrl)
+    this.requestTimeoutMs = Math.max(1000, requestTimeoutMs)
+  }
+
+  private async fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs)
+    try {
+      return await fetch(url, { ...init, signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   buildShopLink(shopId: number): string {
@@ -86,7 +98,7 @@ export class NearcadeClient {
       params.set('page', String(page))
       params.set('limit', String(limit))
 
-      const response = await fetch(`${this.baseUrl}/api/shops?${params.toString()}`)
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/shops?${params.toString()}`)
       if (!response.ok) return null
       return await response.json() as NearcadeListShopsResponse
     } catch {
@@ -109,7 +121,7 @@ export class NearcadeClient {
       }
       const query = params.toString()
       const url = `${this.baseUrl}/api/shops/${shopId}/attendance${query ? `?${query}` : ''}`
-      const response = await fetch(url)
+      const response = await this.fetchWithTimeout(url)
       if (!response.ok) return null
       const data = await response.json() as NearcadeAttendanceResponse
       if (!Array.isArray(data.reported)) data.reported = []
@@ -128,7 +140,7 @@ export class NearcadeClient {
     comment = '由 未知 (未知) 通过 mai-queue 上报',
   ): Promise<NearcadeUpdateResult> {
     try {
-      const response = await fetch(`${this.baseUrl}/api/shops/${shopId}/attendance`, {
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/shops/${shopId}/attendance`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -164,23 +176,33 @@ export class NearcadeClient {
     }
   }
 
+  gameIdFromAttendance(attendance: NearcadeAttendanceResponse | null | undefined, titleId: number): number | null {
+    const game = attendance?.games?.find(g => g.titleId === titleId)
+    return game?.gameId ?? null
+  }
+
   async resolveGameId(
     shopId: number,
     titleId: number,
     shopName?: string,
     aliases: string[] = [],
+    attendanceHint?: NearcadeAttendanceResponse | null,
   ): Promise<number | null> {
     const key = this.cacheKey(shopId, titleId)
     const cached = this.gameIdCache.get(key)
     if (cached) return cached
 
-    const attendance = await this.getAttendance(shopId)
-    if (attendance?.games?.length) {
-      const fromAttendance = attendance.games.find(g => g.titleId === titleId)
-      if (fromAttendance) {
-        this.gameIdCache.set(key, fromAttendance.gameId)
-        return fromAttendance.gameId
-      }
+    const fromHint = this.gameIdFromAttendance(attendanceHint, titleId)
+    if (fromHint) {
+      this.gameIdCache.set(key, fromHint)
+      return fromHint
+    }
+
+    const attendance = attendanceHint ?? await this.getAttendance(shopId)
+    const fromAttendance = this.gameIdFromAttendance(attendance, titleId)
+    if (fromAttendance) {
+      this.gameIdCache.set(key, fromAttendance)
+      return fromAttendance
     }
 
     for (const keyword of buildSearchKeywords(shopName, aliases)) {

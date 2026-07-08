@@ -10,6 +10,7 @@ plugins:
     nearcadeApiToken: ""              # 全局 Token，启用同步时必填
     nearcadeBaseUrl: "https://nearcade.cn"
     nearcadeBotName: "mai-queue"      # 写入 Nearcade 同步备注的 Bot 名
+    nearcadeRequestTimeoutMs: 5000    # Nearcade 请求超时；失败/超时后查卡回退本地
     enableWeather: true               # 全局开启出勤天气预报
     arcades:
       youfang:
@@ -58,10 +59,37 @@ nearcade.search 悠方   # 管理员：查机厅 ID
 
 ## 天气预报
 
-数据源：
+数据源（优先级）：
 
-- **预报**： [Open-Meteo](https://open-meteo.com)（免费、无需 Key，逐小时降水/天气现象）
-- **官方预警**（可选）：[和风天气](https://dev.qweather.com) Warning API（需申请免费 Key）
+- **已配置和风**：实况 / 逐小时 / 逐日走和风；**预警走新版** `/weatheralert/v1/current/{纬度}/{经度}`（旧版 `/v7/warning/now` 仅作回退）；失败时回退 Open-Meteo
+- **未配置和风**：Open-Meteo 免费预报
+
+### 和风天气配置
+
+在[和风控制台](https://console.qweather.com/)创建项目，获取**专属 API Host**。
+
+**方式 A：JWT（推荐）**
+
+```yaml
+qweatherApiHost: "abcxyz.qweatherapi.com"   # 项目专属域名
+qweatherProjectId: "12345ABCDE"             # Project ID (JWT sub)
+qweatherCredentialId: "ABCDE12345"          # Credential ID (JWT kid)
+qweatherPrivateKey: |
+  -----BEGIN PRIVATE KEY-----
+  MC4CAQAwBQYDK2VwBCIEI...
+  -----END PRIVATE KEY-----
+qweatherAuthMode: auto                      # auto / jwt / apikey
+```
+
+**方式 B：API Key**
+
+```yaml
+qweatherApiHost: "abcxyz.qweatherapi.com"
+qweatherApiKey: "your-api-key"
+qweatherAuthMode: apikey
+```
+
+注意：JWT 与 API Key **不要同时使用**。`auto` 模式下有 JWT 配置则优先 JWT。
 
 ### 全局开关
 
@@ -72,8 +100,12 @@ weatherCacheMinutes: 15
 weatherAlertPollMinutes: 30       # 恶劣天气/预警主动推送轮询
 enableWeatherDailyDigest: true    # 订阅群是否默认每日推送
 weatherDailyDigestHour: 10        # 每日摘要小时（默认 10）
-qweatherApiKey: ""                # 可选，填了才有官方预警
-qweatherApiHost: "devapi.qweather.com"
+qweatherApiKey: ""                # API Key 认证（与 JWT 二选一）
+qweatherApiHost: ""               # 和风专属 API Host
+qweatherProjectId: ""             # JWT sub
+qweatherCredentialId: ""        # JWT kid
+qweatherPrivateKey: ""            # Ed25519 私钥 PEM
+qweatherAuthMode: auto            # auto / jwt / apikey
 ```
 
 ### 如何配置机厅区域

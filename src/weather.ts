@@ -1,8 +1,9 @@
 /**
- * 天气服务：Open-Meteo 预报（免 Key）+ 可选和风官方预警。
+ * 天气服务：Open-Meteo 预报（免 Key）+ 可选和风官方数据（JWT / API Key）。
  * Open-Meteo: https://open-meteo.com
- * 和风预警: https://dev.qweather.com/docs/api/warning/
+ * 和风: https://dev.qweather.com/docs/
  */
+import { QWeatherClient } from './qweather'
 
 export interface WeatherCoords {
   latitude: number
@@ -127,7 +128,41 @@ const SEVERITY_RANK: Record<WeatherSeverity, number> = {
 }
 
 function describeWmo(code: number): { label: string, emoji: string, severity: WeatherSeverity } {
+  if (code < 0) return { label: '未知', emoji: '🌡', severity: 'ok' }
   return WMO_LABELS[code] || { label: `天气码 ${code}`, emoji: '🌡', severity: 'ok' }
+}
+
+/** 和风 text 字段 → 严重度/图标（国内实况更准确） */
+function describeQWeatherText(text: string): { label: string, emoji: string, severity: WeatherSeverity } {
+  const t = (text || '').trim()
+  if (!t) return { label: '未知', emoji: '🌡', severity: 'ok' }
+
+  if (/雷暴|冰雹|龙卷|强对流|冻雨|台风/.test(t)) {
+    return { label: t, emoji: '⚡️', severity: 'severe' }
+  }
+  if (/暴雨|大暴雨|特大暴雨|暴雪|大雪|沙尘暴|强沙尘|浓雾|严重霾|道路结冰/.test(t)) {
+    return { label: t, emoji: '🌧', severity: 'bad' }
+  }
+  if (/大雨|中雨|阵雨|雷阵雨|雨夹雪|中雪|雾|霾|浮尘|扬沙|大风/.test(t)) {
+    const emoji = /雪/.test(t) ? '🌨' : /雷/.test(t) ? '⚡️' : /雾|霾/.test(t) ? '🌫' : '🌧'
+    return { label: t, emoji, severity: /大雨|雷阵雨|中雪|大风/.test(t) ? 'bad' : 'mild' }
+  }
+  if (/小雨|毛毛雨|小雪|小到中雨|小到中雪/.test(t)) {
+    const emoji = /雪/.test(t) ? '🌨' : '🌦'
+    return { label: t, emoji, severity: 'mild' }
+  }
+  if (/多云|少云|阴/.test(t)) {
+    return { label: t, emoji: /阴/.test(t) ? '☁️' : '⛅️', severity: 'ok' }
+  }
+  if (/晴|晴朗/.test(t)) {
+    return { label: t, emoji: '☀️', severity: 'ok' }
+  }
+  return { label: t, emoji: '🌡', severity: 'ok' }
+}
+
+function describeCondition(u: UpcomingCondition): { severity: WeatherSeverity } {
+  if (u.weatherCode >= 0) return describeWmo(u.weatherCode)
+  return describeQWeatherText(u.label)
 }
 
 function maxSeverity(a: WeatherSeverity, b: WeatherSeverity): WeatherSeverity {
@@ -142,17 +177,19 @@ function parseIsoLocal(iso: string): Date {
 export class WeatherService {
   private cache = new Map<string, CacheEntry>()
   private geoCache = new Map<string, WeatherCoords>()
+  private qweather: QWeatherClient | null
 
   constructor(
     private options: {
       cacheMinutes?: number
       lookAheadHours?: number
-      qweatherApiKey?: string
-      qweatherApiHost?: string
+      qweather?: QWeatherClient | null
       debug?: boolean
       log?: (msg: string) => void
     } = {},
-  ) {}
+  ) {
+    this.qweather = options.qweather ?? null
+  }
 
   private log(msg: string) {
     if (this.options.debug && this.options.log) this.options.log(msg)
@@ -536,23 +573,225 @@ export class WeatherService {
     return this.geocodeCity(name)
   }
 
-  async getSnapshot(coords: WeatherCoords, arcadeName?: string): Promise<WeatherSnapshot | null> {
+  async getSnapshot(
+    coords: WeatherCoords,
+    arcadeName?: string,
+    options?: { bypassCache?: boolean },
+  ): Promise<WeatherSnapshot | null> {
     const cacheKey = `${coords.latitude.toFixed(4)},${coords.longitude.toFixed(4)}`
-    const cached = this.cache.get(cacheKey)
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.snapshot
+    if (!options?.bypassCache) {
+      const cached = this.cache.get(cacheKey)
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.snapshot
+      }
     }
 
-    const forecast = await this.fetchOpenMeteo(coords)
-    if (!forecast) return null
+    let snapshot: WeatherSnapshot | null = null
 
-    const alerts = await this.fetchQWeatherAlerts(coords)
-    const snapshot = this.buildSnapshot(coords, forecast, alerts, arcadeName)
+    if (this.qweather?.isConfigured()) {
+      snapshot = await this.buildSnapshotFromQWeather(coords, arcadeName)
+      if (!snapshot) {
+        this.log('和风拉取失败，回退 Open-Meteo')
+      }
+    }
+
+    if (!snapshot) {
+      snapshot = await this.buildSnapshotFromOpenMeteo(coords, arcadeName)
+      if (!snapshot) return null
+    }
+
     this.cache.set(cacheKey, {
       expiresAt: Date.now() + this.cacheMinutes * 60_000,
       snapshot,
     })
     return snapshot
+  }
+
+  private async buildSnapshotFromQWeather(
+    coords: WeatherCoords,
+    arcadeName?: string,
+  ): Promise<WeatherSnapshot | null> {
+    if (!this.qweather?.isConfigured()) return null
+    const bundle = await this.qweather.fetchBundle(coords.longitude, coords.latitude, 'zh')
+    const nowItem = bundle.now?.now
+    const hourly = bundle.hourly?.hourly || []
+    if (!nowItem?.text && !hourly.length) return null
+
+    const now = Date.now()
+    const lookAhead = this.lookAheadHours
+    const currentDesc = describeQWeatherText(nowItem?.text || hourly[0]?.text || '未知')
+    const currentTemp = Number(nowItem?.temp ?? hourly[0]?.temp ?? 0)
+    const currentPrecip = Number(nowItem?.precip ?? 0)
+
+    const upcoming: UpcomingCondition[] = []
+    for (const h of hourly) {
+      if (!h.fxTime) continue
+      const t = new Date(h.fxTime).getTime()
+      const hoursAhead = (t - now) / 3_600_000
+      // 跳过已过去的小时；首小时若与实况重复则略过
+      if (hoursAhead < 0.5) continue
+      if (hoursAhead > lookAhead + 0.01) break
+      const desc = describeQWeatherText(h.text || '未知')
+      upcoming.push({
+        hoursAhead: Math.max(0, Math.round(hoursAhead * 10) / 10),
+        weatherCode: -1,
+        label: desc.label,
+        emoji: desc.emoji,
+        precipitationMm: Number(h.precip ?? 0) || 0,
+        precipProbability: Number(h.pop ?? 0) || 0,
+        temperature: Number(h.temp ?? 0) || currentTemp,
+      })
+    }
+
+    const alerts: WeatherAlert[] = this.qweather.mapWarnings(bundle.warning).map(w => ({
+      ...w,
+      source: 'qweather' as const,
+    }))
+
+    let severity: WeatherSeverity = currentDesc.severity
+    for (const u of upcoming) {
+      severity = maxSeverity(severity, describeCondition(u).severity)
+    }
+    if (alerts.length > 0) severity = maxSeverity(severity, 'severe')
+
+    const day0 = bundle.daily?.daily?.[0]
+    const dailyDesc = describeQWeatherText(day0?.textDay || currentDesc.label)
+    const daily = day0 ? {
+      weatherCode: -1,
+      label: dailyDesc.label,
+      emoji: dailyDesc.emoji,
+      tempMax: Number(day0.tempMax ?? 0) || currentTemp,
+      tempMin: Number(day0.tempMin ?? 0) || currentTemp,
+      precipitationSum: Number(day0.precip ?? 0) || 0,
+    } : null
+
+    const place = arcadeName || coords.resolvedName || '机厅附近'
+    const queryHint = this.buildWeatherReminder(currentDesc, upcoming, alerts, severity)
+    const digestText = this.formatDigestFromParts({
+      place,
+      currentDesc,
+      currentTemp,
+      daily,
+      alerts,
+      primarySource: '和风天气',
+    })
+    const alertPushText = this.formatAlertPush(place, currentDesc, upcoming, alerts, severity)
+
+    return {
+      coords,
+      fetchedAt: now,
+      timezone: 'Asia/Shanghai',
+      current: {
+        temperature: Number.isFinite(currentTemp) ? currentTemp : 0,
+        weatherCode: -1,
+        label: currentDesc.label,
+        emoji: currentDesc.emoji,
+        precipitationMm: Number.isFinite(currentPrecip) ? currentPrecip : 0,
+      },
+      upcoming,
+      daily,
+      alerts,
+      severity,
+      queryHint,
+      digestText,
+      alertPushText,
+    }
+  }
+
+  private async buildSnapshotFromOpenMeteo(
+    coords: WeatherCoords,
+    arcadeName?: string,
+  ): Promise<WeatherSnapshot | null> {
+    const forecast = await this.fetchOpenMeteo(coords)
+    if (!forecast) return null
+
+    const alerts = this.qweather?.isConfigured()
+      ? await this.fetchQWeatherAlerts(coords)
+      : []
+    return this.buildSnapshotFromOpenMeteoData(coords, forecast, alerts, arcadeName)
+  }
+
+  private buildSnapshotFromOpenMeteoData(
+    coords: WeatherCoords,
+    forecast: OpenMeteoForecast,
+    alerts: WeatherAlert[],
+    arcadeName?: string,
+  ): WeatherSnapshot {
+    const now = Date.now()
+    const lookAhead = this.lookAheadHours
+    const currentCode = forecast.current?.weather_code ?? 0
+    const currentDesc = describeWmo(currentCode)
+    const upcoming: UpcomingCondition[] = []
+
+    const times = forecast.hourly?.time || []
+    for (let i = 0; i < times.length; i++) {
+      const t = parseIsoLocal(times[i]).getTime()
+      const hoursAhead = (t - now) / 3_600_000
+      if (hoursAhead < 0.5) continue
+      if (hoursAhead > lookAhead + 0.01) break
+      const code = forecast.hourly?.weather_code?.[i] ?? 0
+      const desc = describeWmo(code)
+      upcoming.push({
+        hoursAhead: Math.max(0, Math.round(hoursAhead * 10) / 10),
+        weatherCode: code,
+        label: desc.label,
+        emoji: desc.emoji,
+        precipitationMm: forecast.hourly?.precipitation?.[i] ?? 0,
+        precipProbability: forecast.hourly?.precipitation_probability?.[i] ?? 0,
+        temperature: forecast.hourly?.temperature_2m?.[i] ?? forecast.current?.temperature_2m ?? 0,
+      })
+    }
+
+    let severity: WeatherSeverity = currentDesc.severity
+    for (const u of upcoming) {
+      severity = maxSeverity(severity, describeCondition(u).severity)
+    }
+    if (alerts.length > 0) severity = maxSeverity(severity, 'severe')
+
+    const dailyCode = forecast.daily?.weather_code?.[0] ?? currentCode
+    const dailyDesc = describeWmo(dailyCode)
+    const daily = forecast.daily ? {
+      weatherCode: dailyCode,
+      label: dailyDesc.label,
+      emoji: dailyDesc.emoji,
+      tempMax: forecast.daily.temperature_2m_max?.[0] ?? 0,
+      tempMin: forecast.daily.temperature_2m_min?.[0] ?? 0,
+      precipitationSum: forecast.daily.precipitation_sum?.[0] ?? 0,
+    } : null
+
+    const place = arcadeName || coords.resolvedName || '机厅附近'
+    const queryHint = this.buildWeatherReminder(currentDesc, upcoming, alerts, severity)
+    const digestText = this.formatDigestFromParts({
+      place,
+      currentDesc,
+      currentTemp: forecast.current?.temperature_2m ?? 0,
+      daily,
+      alerts,
+      primarySource: alerts.length && this.qweather?.isConfigured()
+        ? 'Open-Meteo + 和风预警'
+        : 'Open-Meteo',
+    })
+    const alertPushText = this.formatAlertPush(place, currentDesc, upcoming, alerts, severity)
+
+    return {
+      coords,
+      fetchedAt: now,
+      timezone: forecast.timezone || 'Asia/Shanghai',
+      current: {
+        temperature: forecast.current?.temperature_2m ?? 0,
+        weatherCode: currentCode,
+        label: currentDesc.label,
+        emoji: currentDesc.emoji,
+        precipitationMm: forecast.current?.precipitation ?? 0,
+      },
+      upcoming,
+      daily,
+      alerts,
+      severity,
+      queryHint,
+      digestText,
+      alertPushText,
+    }
   }
 
   private async fetchOpenMeteo(coords: WeatherCoords): Promise<OpenMeteoForecast | null> {
@@ -580,181 +819,27 @@ export class WeatherService {
   }
 
   private async fetchQWeatherAlerts(coords: WeatherCoords): Promise<WeatherAlert[]> {
-    const key = this.options.qweatherApiKey?.trim()
-    if (!key) return []
-    const host = (this.options.qweatherApiHost || 'devapi.qweather.com').replace(/^https?:\/\//, '')
-    // location=经度,纬度
-    const url = `https://${host}/v7/warning/now?location=${coords.longitude.toFixed(2)},${coords.latitude.toFixed(2)}&key=${encodeURIComponent(key)}&lang=zh`
-    try {
-      const res = await fetch(url, { headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip' } })
-      if (!res.ok) {
-        this.log(`和风预警 HTTP ${res.status}`)
-        return []
-      }
-      const data = await res.json() as {
-        code?: string
-        warning?: Array<{
-          id?: string
-          sender?: string
-          pubTime?: string
-          title?: string
-          startTime?: string
-          endTime?: string
-          status?: string
-          level?: string
-          typeName?: string
-          type?: string
-          text?: string
-        }>
-      }
-      if (data.code !== '200' || !Array.isArray(data.warning)) {
-        this.log(`和风预警无数据 code=${data.code}`)
-        return []
-      }
-      return data.warning
-        .filter(w => w.status !== 'cancel')
-        .map(w => ({
-          id: w.id || `${w.type || ''}-${w.pubTime || ''}-${w.title || ''}`,
-          title: w.title || `${w.typeName || '天气'}${w.level || ''}预警`,
-          type: w.typeName || w.type || '预警',
-          level: w.level || '',
-          text: (w.text || '').trim(),
-          startTime: w.startTime,
-          endTime: w.endTime,
-          source: 'qweather' as const,
-        }))
-    } catch (err) {
-      this.log(`和风预警异常: ${err}`)
-      return []
-    }
+    if (!this.qweather?.isConfigured()) return []
+    const alerts = await this.qweather.getActiveAlerts(coords.latitude, coords.longitude, 'zh')
+    return alerts.map(w => ({
+      ...w,
+      source: 'qweather' as const,
+    }))
   }
 
-  private buildSnapshot(
-    coords: WeatherCoords,
-    forecast: OpenMeteoForecast,
-    alerts: WeatherAlert[],
-    arcadeName?: string,
-  ): WeatherSnapshot {
-    const now = Date.now()
-    const lookAhead = this.lookAheadHours
-    const currentCode = forecast.current?.weather_code ?? 0
-    const currentDesc = describeWmo(currentCode)
-    const upcoming: UpcomingCondition[] = []
-
-    const times = forecast.hourly?.time || []
-    for (let i = 0; i < times.length; i++) {
-      const t = parseIsoLocal(times[i]).getTime()
-      const hoursAhead = (t - now) / 3_600_000
-      if (hoursAhead < -0.25) continue
-      if (hoursAhead > lookAhead + 0.01) break
-      const code = forecast.hourly?.weather_code?.[i] ?? 0
-      const desc = describeWmo(code)
-      upcoming.push({
-        hoursAhead: Math.max(0, Math.round(hoursAhead * 10) / 10),
-        weatherCode: code,
-        label: desc.label,
-        emoji: desc.emoji,
-        precipitationMm: forecast.hourly?.precipitation?.[i] ?? 0,
-        precipProbability: forecast.hourly?.precipitation_probability?.[i] ?? 0,
-        temperature: forecast.hourly?.temperature_2m?.[i] ?? forecast.current?.temperature_2m ?? 0,
-      })
-    }
-
-    let severity: WeatherSeverity = currentDesc.severity
-    for (const u of upcoming) {
-      severity = maxSeverity(severity, describeWmo(u.weatherCode).severity)
-    }
-    if (alerts.length > 0) severity = maxSeverity(severity, 'severe')
-
-    const dailyCode = forecast.daily?.weather_code?.[0] ?? currentCode
-    const dailyDesc = describeWmo(dailyCode)
-    const daily = forecast.daily ? {
-      weatherCode: dailyCode,
-      label: dailyDesc.label,
-      emoji: dailyDesc.emoji,
-      tempMax: forecast.daily.temperature_2m_max?.[0] ?? 0,
-      tempMin: forecast.daily.temperature_2m_min?.[0] ?? 0,
-      precipitationSum: forecast.daily.precipitation_sum?.[0] ?? 0,
-    } : null
-
-    const queryHint = this.formatQueryHint(upcoming, alerts, severity)
-    const place = arcadeName || coords.resolvedName || '机厅附近'
-    const digestText = this.formatDigest(place, currentDesc, forecast, daily, alerts)
-    const alertPushText = this.formatAlertPush(place, upcoming, alerts, severity)
-
-    return {
-      coords,
-      fetchedAt: now,
-      timezone: forecast.timezone || 'Asia/Shanghai',
-      current: {
-        temperature: forecast.current?.temperature_2m ?? 0,
-        weatherCode: currentCode,
-        label: currentDesc.label,
-        emoji: currentDesc.emoji,
-        precipitationMm: forecast.current?.precipitation ?? 0,
-      },
-      upcoming,
-      daily,
-      alerts,
-      severity,
-      queryHint,
-      digestText,
-      alertPushText,
-    }
-  }
-
-  private collectBadConditions(upcoming: UpcomingCondition[]): UpcomingCondition[] {
-    return upcoming.filter(u => {
-      const sev = describeWmo(u.weatherCode).severity
-      return sev !== 'ok' || u.precipitationMm >= 0.2 || u.precipProbability >= 50
-    })
-  }
-
-  private formatQueryHint(
-    upcoming: UpcomingCondition[],
-    alerts: WeatherAlert[],
-    severity: WeatherSeverity,
-  ): string | null {
-    if (severity === 'ok' && alerts.length === 0) return null
-
-    const hours = this.lookAheadHours
-    const bad = this.collectBadConditions(upcoming)
-    const labels = [...new Set(bad.map(b => b.label))]
-    const emojis = [...new Set(bad.map(b => b.emoji))].join('')
-    const alertPart = alerts.length
-      ? `预警：${alerts.map(a => a.title).join('、')}`
-      : ''
-
-    if (alerts.length || severity === 'severe' || severity === 'bad') {
-      const weatherPart = labels.length ? labels.join('、') : (alerts[0]?.type || '恶劣天气')
-      const icons = emojis || (alerts.length ? '⚠️' : '🌧')
-      const tip = severity === 'severe' || alerts.length
-        ? '不建议出勤...'
-        : '出门小心，建议改时间或做好防护！'
-      const base = `${icons} ${hours}小时内可能有 ${weatherPart}！${tip}`
-      return alertPart ? `${base}\n⚠️ ${alertPart}` : base
-    }
-
-    // mild: 小雨等
-    if (labels.length) {
-      const icon = emojis || '🌧'
-      return `${icon} ${hours}小时内可能有 ${labels.join('、')} 哦，出勤记得带伞！`
-    }
-    return null
-  }
-
-  private formatDigest(
-    place: string,
-    currentDesc: { label: string, emoji: string },
-    forecast: OpenMeteoForecast,
-    daily: WeatherSnapshot['daily'],
-    alerts: WeatherAlert[],
-  ): string {
-    const temp = forecast.current?.temperature_2m
+  private formatDigestFromParts(parts: {
+    place: string
+    currentDesc: { label: string, emoji: string }
+    currentTemp: number
+    daily: WeatherSnapshot['daily']
+    alerts: WeatherAlert[]
+    primarySource: string
+  }): string {
+    const { place, currentDesc, currentTemp, daily, alerts, primarySource } = parts
     const lines = [
       `☀️ 今日天气 · ${place}`,
       '',
-      `${currentDesc.emoji} 现在：${currentDesc.label}${typeof temp === 'number' ? ` ${Math.round(temp)}℃` : ''}`,
+      `${currentDesc.emoji} 现在：${currentDesc.label}${Number.isFinite(currentTemp) ? ` ${Math.round(currentTemp)}℃` : ''}`,
     ]
     if (daily) {
       lines.push(`${daily.emoji} 今日：${daily.label}，${Math.round(daily.tempMin)}~${Math.round(daily.tempMax)}℃`)
@@ -770,54 +855,92 @@ export class WeatherService {
       }
     }
     lines.push('')
-    lines.push('数据：Open-Meteo' + (alerts.length ? ' + 和风预警' : '') + '（仅供参考）')
+    lines.push(`数据：${primarySource}（仅供参考）`)
     return lines.join('\n')
+  }
+
+  private isSignificantCondition(u: UpcomingCondition): boolean {
+    const sev = describeCondition(u).severity
+    const label = u.label
+    if (sev === 'severe' || sev === 'bad') return true
+    if (/雨|雪|雷|雹|雾|霾|沙|尘|风|冻/.test(label)) {
+      return u.precipitationMm >= 0.1 || u.precipProbability >= 40
+    }
+    return u.precipitationMm >= 0.5 || u.precipProbability >= 70
+  }
+
+  private collectBadConditions(upcoming: UpcomingCondition[]): UpcomingCondition[] {
+    return upcoming.filter(u => this.isSignificantCondition(u))
+  }
+
+  /** 查卡/推送用提醒：优先「现在」，其次未来，预警始终展示 */
+  private buildWeatherReminder(
+    current: { label: string, emoji: string, severity: WeatherSeverity },
+    upcoming: UpcomingCondition[],
+    alerts: WeatherAlert[],
+    overallSeverity: WeatherSeverity,
+  ): string | null {
+    const parts: string[] = []
+    const hours = this.lookAheadHours
+
+    if (alerts.length) {
+      parts.push(`⚠️ 生效预警：${alerts.map(a => a.title).join('、')}`)
+    }
+
+    const currentBad = current.severity === 'bad' || current.severity === 'severe'
+    const futureBad = this.collectBadConditions(upcoming).filter(u => u.label !== current.label)
+    const futureLabels = [...new Set(futureBad.map(b => b.label))]
+
+    if (currentBad) {
+      const tip = current.severity === 'severe' || alerts.length
+        ? '不建议出勤，注意安全！'
+        : '出勤请备好雨具，注意安全！'
+      parts.push(`${current.emoji} 现在正在${current.label}！${tip}`)
+      if (futureLabels.length) {
+        const emojis = [...new Set(futureBad.map(b => b.emoji))].join('') || '🌦'
+        parts.push(`${emojis} 随后 ${hours} 小时内可能转${futureLabels.join('、')}`)
+      }
+    } else if (futureLabels.length) {
+      const emojis = [...new Set(futureBad.map(b => b.emoji))].join('') || '🌧'
+      if (overallSeverity === 'severe' || overallSeverity === 'bad' || alerts.length) {
+        parts.push(`${emojis} 未来 ${hours} 小时内可能有 ${futureLabels.join('、')}！${alerts.length ? '不建议出勤，注意安全！' : '出门小心，建议改时间或做好防护！'}`)
+      } else {
+        parts.push(`${emojis} 未来 ${hours} 小时内可能有 ${futureLabels.join('、')} 哦，出勤记得带伞！`)
+      }
+    } else if (alerts.length) {
+      parts.push('请关注官方预警，谨慎做出勤计划。')
+    }
+
+    if (!parts.length) return null
+    return parts.join('\n')
   }
 
   private formatAlertPush(
     place: string,
+    current: { label: string, emoji: string, severity: WeatherSeverity },
     upcoming: UpcomingCondition[],
     alerts: WeatherAlert[],
     severity: WeatherSeverity,
   ): string | null {
-    if (severity !== 'bad' && severity !== 'severe' && alerts.length === 0) return null
-
-    const hours = this.lookAheadHours
-    const bad = this.collectBadConditions(upcoming)
-    const labels = [...new Set(bad.map(b => b.label))]
-    const emojis = [...new Set(bad.map(b => b.emoji))].join('') || '⚠️'
-    const lines = [`⚠️ 天气提醒 · ${place}`, '']
-
-    if (alerts.length) {
-      for (const a of alerts.slice(0, 3)) {
-        lines.push(`${a.title}`)
-        if (a.text) {
-          const short = a.text.length > 80 ? `${a.text.slice(0, 80)}…` : a.text
-          lines.push(short)
-        }
-      }
-      lines.push('')
-    }
-
-    if (labels.length) {
-      lines.push(`${emojis} 未来 ${hours} 小时可能有 ${labels.join('、')}`)
-      lines.push(severity === 'severe' || alerts.length ? '不建议出勤，注意安全。' : '出门请做好防护，注意安全。')
-    } else if (alerts.length) {
-      lines.push('请关注预警，谨慎做出勤计划。')
-    }
-
-    lines.push('')
-    lines.push('数据仅供参考，以官方发布为准。')
-    return lines.join('\n')
+    const body = this.buildWeatherReminder(current, upcoming, alerts, severity)
+    if (!body) return null
+    return [`⚠️ 天气提醒 · ${place}`, '', body, '', '数据仅供参考，以官方发布为准。'].join('\n')
   }
 
   /** 用于推送去重的指纹 */
   fingerprint(snapshot: WeatherSnapshot): string {
     const alertIds = snapshot.alerts.map(a => a.id).sort().join(',')
+    const currentKey = `${snapshot.current.label}@${snapshot.current.emoji}`
     const worst = snapshot.upcoming
-      .filter(u => describeWmo(u.weatherCode).severity !== 'ok')
-      .map(u => `${u.weatherCode}@${Math.floor(u.hoursAhead)}`)
+      .filter(u => this.isSignificantCondition(u))
+      .map(u => `${u.label}@${Math.floor(u.hoursAhead)}`)
       .join('|')
-    return `${snapshot.severity}|${alertIds}|${worst}`
+    return `${snapshot.severity}|${currentKey}|${alertIds}|${worst}`
+  }
+
+  /** 尚未推送过的预警 ID（用于订阅群主动推送） */
+  findUnpushedAlertIds(snapshot: WeatherSnapshot, pushedIds: string[]): string[] {
+    const pushed = new Set(pushedIds)
+    return snapshot.alerts.map(a => a.id).filter(id => !pushed.has(id))
   }
 }

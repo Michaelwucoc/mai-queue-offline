@@ -15,8 +15,13 @@ plugins:
     weatherAlertPollMinutes: 30         # 预警轮询间隔
     enableWeatherDailyDigest: true      # 订阅群每日早间摘要
     weatherDailyDigestHour: 10          # 默认 10:00
-    qweatherApiKey: ""                  # 可选：和风 Key，用于官方预警
-    qweatherApiHost: "devapi.qweather.com"
+    qweatherApiKey: ""
+    qweatherApiHost: ""                   # 和风控制台项目专属域名
+    # JWT 认证（推荐，与 API Key 二选一）
+    qweatherProjectId: ""
+    qweatherCredentialId: ""
+    qweatherPrivateKey: ""
+    qweatherAuthMode: auto
     debug: false
     arcades:
       wujiaochang:
