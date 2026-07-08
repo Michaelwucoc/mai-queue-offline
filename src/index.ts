@@ -16,6 +16,7 @@ import {
 import { ArcadePredictor, DEFAULT_FORECAST_HOURS, DEFAULT_FORECAST_STEP_MINUTES, DEFAULT_HISTORY_HOURS, FORECAST_DISCLAIMER, type PredictorContext } from './predictor'
 import { DEFAULT_CHART_HISTORY_HOURS, generateQueueChartSvg, renderChartToPng } from './chart'
 import { DEFAULT_CLOSE_GRACE_MINUTES, resolveOperatingHours } from './event-quality'
+import { WeatherService, type WeatherSnapshot } from './weather'
 
 export const name = 'mai-queue'
 
@@ -106,6 +107,35 @@ export interface ArcadeConfig {
   operatingOpenHour?: number
   operatingCloseHour?: number
   operatingCloseGraceMinutes?: number
+  /** 是否为本机厅启用天气（未设则跟随全局 enableWeather） */
+  enableWeather?: boolean
+  /** 机厅区域纬度（最高优先；与 longitude 成对配置） */
+  weatherLatitude?: number
+  /** 机厅区域经度（最高优先；与 latitude 成对配置） */
+  weatherLongitude?: number
+  /** 机厅所在城市（未配经纬度时用，如「上海」「杭州市」） */
+  weatherCity?: string
+  /** 机厅所在区/县（可选；配合 weatherCity，如「静安」「嘉定区」） */
+  weatherDistrict?: string
+  /** 兼容旧字段：单行地名（仍可写「上海市静安区」；优先建议用 city+district） */
+  weatherLocation?: string
+}
+
+interface WeatherSubscription {
+  groupId: string
+  platform: string
+  selfId: string
+  arcadeIds: string[]
+  /** 是否接收每日早间天气摘要（默认跟随全局 enableWeatherDailyDigest） */
+  enableDailyDigest?: boolean
+}
+
+interface WeatherStore {
+  subscriptions: WeatherSubscription[]
+  /** groupId|arcadeId → 上次推送指纹，避免刷屏 */
+  lastAlertFingerprints: Record<string, string>
+  /** YYYY-MM-DD → 已推过每日摘要的 group|arcade 键 */
+  lastDailyDigestDates: Record<string, string>
 }
 
 export interface ArcadeStatus {
@@ -130,6 +160,7 @@ interface TemplateExtras {
   countFromNearcade?: boolean
   arcadeId?: string
   isPredict?: boolean
+  weatherHint?: string
 }
 
 interface EffectiveCountResult {
@@ -163,6 +194,12 @@ export const Config = Schema.object({
       operatingOpenHour: Schema.number().description('营业开始小时（0-23，留空则继承全局 operatingOpenHour）'),
       operatingCloseHour: Schema.number().description('营业结束小时（含，留空则继承全局 operatingCloseHour）'),
       operatingCloseGraceMinutes: Schema.number().description('闭店宽容分钟（延迟打烊，留空则继承全局）'),
+      enableWeather: Schema.boolean().description('是否为本机厅启用天气（留空则跟随全局 enableWeather）'),
+      weatherLatitude: Schema.number().description('机厅区域纬度（最高优先；与 weatherLongitude 成对填写，地图取点）'),
+      weatherLongitude: Schema.number().description('机厅区域经度（最高优先；与 weatherLatitude 成对填写）'),
+      weatherCity: Schema.string().description('机厅所在城市（未填经纬度时用，如「上海」「杭州」）'),
+      weatherDistrict: Schema.string().description('机厅所在区/县（可选；配合 weatherCity，如「静安」「嘉定区」「南山」）'),
+      weatherLocation: Schema.string().description('兼容旧字段：单行地名（如「上海市静安区」）；建议改用 weatherCity + weatherDistrict'),
     }).description('机厅配置'),
   })).description('机厅数据（键名为机厅ID，例如：wujiaochang）'),
   operatingOpenHour: Schema.number().default(10).description('全局营业开始小时（0-23，机厅未单独配置时使用）'),
@@ -176,6 +213,14 @@ export const Config = Schema.object({
   nearcadeBotName: Schema.string().default('mai-queue').description('Bot 名称（写入 Nearcade 同步备注）'),
   forecastHours: Schema.number().default(DEFAULT_FORECAST_HOURS).description('预测未来小时数（默认 8）'),
   forecastStepMinutes: Schema.number().default(DEFAULT_FORECAST_STEP_MINUTES).description('预测时间步长（分钟，默认 30）'),
+  enableWeather: Schema.boolean().default(false).description('全局开启天气预报（查卡提醒 + 群订阅推送）'),
+  weatherLookAheadHours: Schema.number().default(4).description('查卡/预警关注未来多少小时内的天气（默认 4）'),
+  weatherCacheMinutes: Schema.number().default(15).description('天气数据缓存分钟数（默认 15）'),
+  weatherAlertPollMinutes: Schema.number().default(30).description('恶劣天气/预警主动推送轮询间隔（分钟，默认 30）'),
+  enableWeatherDailyDigest: Schema.boolean().default(false).description('是否默认开启每日天气摘要推送（订阅时可覆盖）'),
+  weatherDailyDigestHour: Schema.number().default(10).description('每日天气摘要推送小时（0-23，默认 10）'),
+  qweatherApiKey: Schema.string().role('secret').default('').description('和风天气 API Key（可选，用于官方预警；留空则仅用 Open-Meteo 预报）'),
+  qweatherApiHost: Schema.string().default('devapi.qweather.com').description('和风 API Host（免费订阅一般为 devapi.qweather.com）'),
   enableMessageFooter: Schema.boolean().default(false).description('是否在消息末尾附加页脚'),
   messageFooter: Schema.string().default(`Made By Milk with ❤️ | awmc.cc | v${PLUGIN_VERSION} [InslideAlpha]`).description('消息页脚（enableMessageFooter 为 true 时生效）'),
   debug: Schema.boolean().default(false).description('是否启用调试日志'),
@@ -195,6 +240,14 @@ export function apply(ctx: Context, config: any) {
     operatingOpenHour: globalOperatingOpenHour,
     operatingCloseHour: globalOperatingCloseHour,
     operatingCloseGraceMinutes: globalOperatingCloseGraceMinutes,
+    enableWeather: globalEnableWeather,
+    weatherLookAheadHours,
+    weatherCacheMinutes,
+    weatherAlertPollMinutes,
+    enableWeatherDailyDigest,
+    weatherDailyDigestHour,
+    qweatherApiKey,
+    qweatherApiHost,
     enableMessageFooter,
     messageFooter,
     debug,
@@ -202,6 +255,9 @@ export function apply(ctx: Context, config: any) {
 
   const forecastHours = configForecastHours || DEFAULT_FORECAST_HOURS
   const forecastStepMinutes = configForecastStepMinutes || DEFAULT_FORECAST_STEP_MINUTES
+  const weatherEnabled = !!globalEnableWeather
+  const pollMinutes = Math.max(5, weatherAlertPollMinutes || 30)
+  const digestHour = Math.min(23, Math.max(0, weatherDailyDigestHour ?? 10))
   const globalOperatingHours = resolveOperatingHours(
     {
       openHour: globalOperatingOpenHour ?? 10,
@@ -212,6 +268,14 @@ export function apply(ctx: Context, config: any) {
 
   const nearcade = new NearcadeClient(nearcadeBaseUrl || 'https://nearcade.cn')
   const predictor = new ArcadePredictor(ctx.baseDir || process.cwd())
+  const weatherService = new WeatherService({
+    cacheMinutes: weatherCacheMinutes || 15,
+    lookAheadHours: weatherLookAheadHours || 4,
+    qweatherApiKey: qweatherApiKey || '',
+    qweatherApiHost: qweatherApiHost || 'devapi.qweather.com',
+    debug,
+    log: (msg) => ctx.logger('mai-queue').debug(`[weather] ${msg}`),
+  })
 
   const logDebug = (message: string) => {
     if (debug) ctx.logger('mai-queue').debug(message)
@@ -295,6 +359,48 @@ export function apply(ctx: Context, config: any) {
     return path.join(dataDir, 'mai-queue-status.yml')
   }
 
+  function getWeatherStorePath(): string {
+    const baseDir = ctx.baseDir || process.cwd()
+    const dataDir = path.join(baseDir, 'data')
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true })
+    }
+    return path.join(dataDir, 'mai-queue-weather.yml')
+  }
+
+  let weatherStore: WeatherStore = {
+    subscriptions: [],
+    lastAlertFingerprints: {},
+    lastDailyDigestDates: {},
+  }
+
+  function loadWeatherStore() {
+    try {
+      const filePath = getWeatherStorePath()
+      if (!fs.existsSync(filePath)) return
+      const data = yaml.parse(fs.readFileSync(filePath, 'utf8')) as WeatherStore | null
+      if (!data || typeof data !== 'object') return
+      weatherStore = {
+        subscriptions: Array.isArray(data.subscriptions) ? data.subscriptions : [],
+        lastAlertFingerprints: data.lastAlertFingerprints || {},
+        lastDailyDigestDates: data.lastDailyDigestDates || {},
+      }
+      logDebug(`天气订阅已加载：${weatherStore.subscriptions.length} 条`)
+    } catch (error) {
+      ctx.logger('mai-queue').error('加载天气订阅失败:', error)
+    }
+  }
+
+  function saveWeatherStore() {
+    try {
+      fs.writeFileSync(getWeatherStorePath(), yaml.stringify(weatherStore, { indent: 2, lineWidth: 0 }), 'utf8')
+    } catch (error) {
+      ctx.logger('mai-queue').error('保存天气订阅失败:', error)
+    }
+  }
+
+  loadWeatherStore()
+
   async function saveStatusToFile() {
     try {
       const statusData: Record<string, ArcadeStatus> = {}
@@ -364,6 +470,54 @@ export function apply(ctx: Context, config: any) {
 
   function getArcadeId(alias: string): string | null {
     return aliasMap.get(alias.toLowerCase()) || null
+  }
+
+  function isWeatherEnabledForArcade(config: ArcadeConfig): boolean {
+    if (!weatherEnabled) return false
+    if (config.enableWeather === false) return false
+    if (config.enableWeather === true) return true
+    return true
+  }
+
+  function hasWeatherRegion(config: ArcadeConfig): boolean {
+    const hasCoords = typeof config.weatherLatitude === 'number'
+      && Number.isFinite(config.weatherLatitude)
+      && typeof config.weatherLongitude === 'number'
+      && Number.isFinite(config.weatherLongitude)
+    return hasCoords
+      || !!(config.weatherCity && config.weatherCity.trim())
+      || !!(config.weatherLocation && config.weatherLocation.trim())
+  }
+
+  function formatWeatherRegionLabel(config: ArcadeConfig): string {
+    if (typeof config.weatherLatitude === 'number' && typeof config.weatherLongitude === 'number') {
+      return `${config.weatherLatitude}, ${config.weatherLongitude}`
+    }
+    const city = (config.weatherCity || '').trim()
+    const district = (config.weatherDistrict || '').trim()
+    if (city && district) return `${city} · ${district}`
+    if (city) return city
+    return config.weatherLocation || config.address || '未配置区域'
+  }
+
+  async function getArcadeWeather(arcade: ArcadeData): Promise<WeatherSnapshot | null> {
+    if (!isWeatherEnabledForArcade(arcade.config)) return null
+    if (!hasWeatherRegion(arcade.config)) {
+      logDebug(`天气跳过（未配置区域）: ${arcade.config.name}`)
+      return null
+    }
+    const coords = await weatherService.resolveCoords({
+      latitude: arcade.config.weatherLatitude,
+      longitude: arcade.config.weatherLongitude,
+      city: arcade.config.weatherCity,
+      district: arcade.config.weatherDistrict,
+      location: arcade.config.weatherLocation || arcade.config.address,
+    })
+    if (!coords) {
+      logDebug(`天气区域解析失败: ${arcade.config.name}`)
+      return null
+    }
+    return weatherService.getSnapshot(coords, arcade.config.name)
   }
 
   function isNearcadeEnabled(config: ArcadeConfig): boolean {
@@ -676,6 +830,12 @@ export function apply(ctx: Context, config: any) {
     message = message.replace(/\{predictionMethod\}/g, prediction.method)
     message = message.replace(/\{nearcadeDataPoints\}/g, nearcadeDataPoints.toString())
     message = message.replace(/\{avgPlayMinutes\}/g, predictor.getPlayMinutes(arcadeId, defaultPlayTimePerPerson).toString())
+    message = message.replace(/\{weather\}/g, extras.weatherHint || '')
+
+    if (!extras.weatherHint) {
+      message = message.replace(/\n\{weather\}/g, '')
+      message = message.replace(/\{weather\}\n?/g, '')
+    }
 
     if (!status.updateTime) {
       message = message.replace(/ \(.*分钟前\)/g, '')
@@ -759,13 +919,26 @@ export function apply(ctx: Context, config: any) {
   async function generateQueryMessage(arcadeId: string, arcade: ArcadeData): Promise<string> {
     const effective = await resolveEffectiveCount(arcadeId, arcade)
     const template = arcade.config.queryMessageTemplate || defaultQueryTemplate
-    return replaceTemplateVariables(template, arcadeId, arcade, undefined, {
+    let weatherHint = ''
+    try {
+      const snap = await getArcadeWeather(arcade)
+      weatherHint = snap?.queryHint || ''
+    } catch (err) {
+      logDebug(`查卡天气失败: ${err}`)
+    }
+    let message = replaceTemplateVariables(template, arcadeId, arcade, undefined, {
       nearcadeData: effective.nearcadeData,
       nearcadeCount: effective.nearcadeCount,
       effectiveCount: effective.count,
       countFromNearcade: effective.fromNearcade,
       arcadeId,
+      weatherHint,
     })
+    // 模板未写 {weather} 时，有提醒则自动追加在末尾
+    if (weatherHint && !template.includes('{weather}')) {
+      message = `${message}\n\n${weatherHint}`
+    }
+    return message
   }
 
   async function generatePredictMessage(arcadeId: string, arcade: ArcadeData): Promise<{ text: string, chartPath: string | null }> {
@@ -828,6 +1001,162 @@ export function apply(ctx: Context, config: any) {
   function parsePredictCommand(text: string): string | null {
     const match = text.match(/^predict\s+([a-zA-Z\u4e00-\u9fa5]+)$/i)
     return match ? match[1] : null
+  }
+
+  function parseWeatherCommand(text: string): {
+    action: 'sub' | 'unsub' | 'list' | 'query' | 'help'
+    alias?: string
+  } | null {
+    const trimmed = text.trim()
+    if (/^(subweather|sub\s+weather)\s+list$/i.test(trimmed) || /^weatherlist$/i.test(trimmed)) {
+      return { action: 'list' }
+    }
+    if (/^(subweather|weather)\s+help$/i.test(trimmed) || /^weather$/i.test(trimmed)) {
+      return { action: 'help' }
+    }
+    let m = trimmed.match(/^(?:subweather|sub\s+weather)\s+([a-zA-Z\u4e00-\u9fa5]+)$/i)
+    if (m) return { action: 'sub', alias: m[1] }
+    m = trimmed.match(/^(?:unsubweather|unsub\s+weather)\s+([a-zA-Z\u4e00-\u9fa5]+)$/i)
+    if (m) return { action: 'unsub', alias: m[1] }
+    m = trimmed.match(/^weather\s+([a-zA-Z\u4e00-\u9fa5]+)$/i)
+    if (m) return { action: 'query', alias: m[1] }
+    return null
+  }
+
+  function getGroupContext(session: any): { groupId: string, platform: string, selfId: string } | null {
+    const channel = session.event.channel
+    const channelTypeStr = channel ? String(channel.type) : ''
+    const isGroup = channel && (channelTypeStr === 'group' || channelTypeStr === '0' || channel.type === 0)
+    if (!isGroup || !channel?.id) return null
+    return {
+      groupId: String(channel.id),
+      platform: String(session.platform || session.event?.platform || ''),
+      selfId: String(session.selfId || session.bot?.selfId || ''),
+    }
+  }
+
+  function findSubscription(groupId: string): WeatherSubscription | undefined {
+    return weatherStore.subscriptions.find(s => String(s.groupId) === String(groupId))
+  }
+
+  function formatSubscriptionList(groupId: string): string {
+    const sub = findSubscription(groupId)
+    if (!sub || !sub.arcadeIds.length) {
+      return '本群暂未订阅天气机厅。\n用法：subweather <别名>，例如 subweather yf'
+    }
+    const lines = ['本群天气订阅：']
+    for (const id of sub.arcadeIds) {
+      const arcade = arcades[id]
+      const name = arcade?.config.name || id
+      const aliases = arcade?.config.aliases?.join('/') || id
+      const region = arcade ? formatWeatherRegionLabel(arcade.config) : '未知'
+      const on = arcade && isWeatherEnabledForArcade(arcade.config) && hasWeatherRegion(arcade.config)
+      lines.push(`· ${name}（${aliases}）${on ? '' : ' ⚠️未就绪'} · 区域: ${region}`)
+    }
+    const digest = sub.enableDailyDigest ?? enableWeatherDailyDigest
+    lines.push('')
+    lines.push(`每日 ${digestHour}:00 摘要：${digest ? '开' : '关'}（全局默认 ${enableWeatherDailyDigest ? '开' : '关'}）`)
+    lines.push('取消：unsubweather <别名>')
+    return lines.join('\n')
+  }
+
+  async function handleWeatherSubscribe(session: any, alias: string): Promise<void> {
+    if (!weatherEnabled) {
+      await session.send('天气预报功能未开启，请管理员在插件配置中打开 enableWeather')
+      return
+    }
+    const group = getGroupContext(session)
+    if (!group) {
+      await session.send('天气订阅仅支持群聊')
+      return
+    }
+    const arcadeId = getArcadeId(alias)
+    if (!arcadeId || !arcades[arcadeId]) {
+      await session.send(`未找到机厅别名「${alias}」`)
+      return
+    }
+    if (!checkGroupWhitelist(arcadeId, group.groupId)) {
+      await session.send('本群不在该机厅白名单中')
+      return
+    }
+    const arcade = arcades[arcadeId]
+    if (!hasWeatherRegion(arcade.config)) {
+      await session.send(`机厅「${arcade.config.name}」尚未配置天气区域（经纬度，或 weatherCity[+weatherDistrict]），请先在后台配置`)
+      return
+    }
+    let sub = findSubscription(group.groupId)
+    if (!sub) {
+      sub = {
+        groupId: group.groupId,
+        platform: group.platform,
+        selfId: group.selfId,
+        arcadeIds: [],
+        enableDailyDigest: enableWeatherDailyDigest,
+      }
+      weatherStore.subscriptions.push(sub)
+    } else {
+      sub.platform = group.platform || sub.platform
+      sub.selfId = group.selfId || sub.selfId
+    }
+    if (sub.arcadeIds.includes(arcadeId)) {
+      await session.send(`本群已订阅「${arcade.config.name}」天气\n${formatSubscriptionList(group.groupId)}`)
+      return
+    }
+    sub.arcadeIds.push(arcadeId)
+    saveWeatherStore()
+    await session.send(`✅ 已订阅「${arcade.config.name}」天气\n恶劣天气/预警将主动推送本群\n${formatSubscriptionList(group.groupId)}`)
+  }
+
+  async function handleWeatherUnsubscribe(session: any, alias: string): Promise<void> {
+    const group = getGroupContext(session)
+    if (!group) {
+      await session.send('取消订阅仅支持群聊')
+      return
+    }
+    const arcadeId = getArcadeId(alias)
+    if (!arcadeId) {
+      await session.send(`未找到机厅别名「${alias}」`)
+      return
+    }
+    const sub = findSubscription(group.groupId)
+    if (!sub || !sub.arcadeIds.includes(arcadeId)) {
+      await session.send(`本群未订阅「${alias}」天气`)
+      return
+    }
+    sub.arcadeIds = sub.arcadeIds.filter(id => id !== arcadeId)
+    if (!sub.arcadeIds.length) {
+      weatherStore.subscriptions = weatherStore.subscriptions.filter(s => s.groupId !== group.groupId)
+    }
+    saveWeatherStore()
+    const name = arcades[arcadeId]?.config.name || alias
+    await session.send(`已取消订阅「${name}」天气`)
+  }
+
+  async function handleWeatherQuery(session: any, alias: string): Promise<void> {
+    if (!weatherEnabled) {
+      await session.send('天气预报功能未开启')
+      return
+    }
+    const arcadeId = getArcadeId(alias)
+    if (!arcadeId || !arcades[arcadeId]) {
+      await session.send(`未找到机厅别名「${alias}」`)
+      return
+    }
+    const group = getGroupContext(session)
+    if (group && !checkGroupWhitelist(arcadeId, group.groupId)) return
+    const arcade = arcades[arcadeId]
+    if (!hasWeatherRegion(arcade.config)) {
+      await session.send(`「${arcade.config.name}」未配置天气区域`)
+      return
+    }
+    const snap = await getArcadeWeather(arcade)
+    if (!snap) {
+      await session.send('暂时无法获取天气数据，请稍后再试')
+      return
+    }
+    let text = snap.digestText
+    if (snap.queryHint) text += `\n\n${snap.queryHint}`
+    await session.send(text)
   }
 
   // 夫妻，好耶！
@@ -965,6 +1294,44 @@ export function apply(ctx: Context, config: any) {
       return
     }
 
+    const weatherCmd = parseWeatherCommand(text)
+    if (weatherCmd) {
+      if (weatherCmd.action === 'help') {
+        await session.send([
+          '出勤天气功能：',
+          '· weather <别名> — 查看该机厅今日天气',
+          '· subweather <别名> — 本群订阅该机厅天气预警推送',
+          '· unsubweather <别名> — 取消订阅',
+          '· subweather list — 查看本群订阅列表',
+          '',
+          '查卡（如 yf几）时，若未来有雨/雷等也会自动附带提醒。',
+          '需管理员开启 enableWeather，并为机厅配置经纬度，或 weatherCity（可选 weatherDistrict）。',
+        ].join('\n'))
+        return
+      }
+      if (weatherCmd.action === 'list') {
+        const group = getGroupContext(session)
+        if (!group) {
+          await session.send('订阅列表仅支持群聊')
+          return
+        }
+        await session.send(formatSubscriptionList(group.groupId))
+        return
+      }
+      if (weatherCmd.action === 'sub' && weatherCmd.alias) {
+        await handleWeatherSubscribe(session, weatherCmd.alias)
+        return
+      }
+      if (weatherCmd.action === 'unsub' && weatherCmd.alias) {
+        await handleWeatherUnsubscribe(session, weatherCmd.alias)
+        return
+      }
+      if (weatherCmd.action === 'query' && weatherCmd.alias) {
+        await handleWeatherQuery(session, weatherCmd.alias)
+        return
+      }
+    }
+
     const reportParsed = parseReportCommand(text)
     if (reportParsed) {
       const arcadeId = getArcadeId(reportParsed.alias)
@@ -1030,6 +1397,8 @@ export function apply(ctx: Context, config: any) {
   }
 
   let resetTimerId: NodeJS.Timeout | null = null
+  let weatherAlertTimerId: NodeJS.Timeout | null = null
+  let weatherDigestTimerId: NodeJS.Timeout | null = null
 
   function scheduleMidnightReset() {
     const now = new Date()
@@ -1047,10 +1416,136 @@ export function apply(ctx: Context, config: any) {
 
   scheduleMidnightReset()
 
+  async function sendToGroup(sub: WeatherSubscription, message: string): Promise<boolean> {
+    const channelId = sub.groupId
+    const bots = ctx.bots || []
+    for (const bot of bots) {
+      try {
+        if (sub.selfId && String(bot.selfId) !== String(sub.selfId)) continue
+        if (sub.platform && bot.platform && String(bot.platform) !== String(sub.platform)) continue
+        await bot.sendMessage(channelId, message)
+        return true
+      } catch (err) {
+        logDebug(`天气推送失败 bot=${bot.platform}:${bot.selfId} → ${channelId}: ${err}`)
+      }
+    }
+    // 回退：尝试任意 bot
+    for (const bot of bots) {
+      try {
+        await bot.sendMessage(channelId, message)
+        return true
+      } catch {
+        // continue
+      }
+    }
+    return false
+  }
+
+  async function pollWeatherAlerts() {
+    if (!weatherEnabled || !weatherStore.subscriptions.length) return
+    for (const sub of weatherStore.subscriptions) {
+      for (const arcadeId of sub.arcadeIds) {
+        const arcade = arcades[arcadeId]
+        if (!arcade || !isWeatherEnabledForArcade(arcade.config) || !hasWeatherRegion(arcade.config)) continue
+        if (!checkGroupWhitelist(arcadeId, sub.groupId)) continue
+        let snap: WeatherSnapshot | null = null
+        try {
+          snap = await getArcadeWeather(arcade)
+        } catch (err) {
+          logDebug(`预警轮询失败 ${arcadeId}: ${err}`)
+          continue
+        }
+        if (!snap?.alertPushText) continue
+        const fp = weatherService.fingerprint(snap)
+        const key = `${sub.groupId}|${arcadeId}`
+        if (weatherStore.lastAlertFingerprints[key] === fp) continue
+        const ok = await sendToGroup(sub, snap.alertPushText)
+        if (ok) {
+          weatherStore.lastAlertFingerprints[key] = fp
+          saveWeatherStore()
+          logDebug(`已推送天气预警 → 群 ${sub.groupId} / ${arcade.config.name}`)
+        }
+      }
+    }
+  }
+
+  function scheduleWeatherAlertPoll() {
+    if (!weatherEnabled) return
+    const run = () => {
+      pollWeatherAlerts().catch(err => {
+        ctx.logger('mai-queue').error('天气预警轮询失败:', err)
+      }).finally(() => {
+        weatherAlertTimerId = setTimeout(run, pollMinutes * 60_000)
+      })
+    }
+    // 启动后稍晚再跑，避免与其它初始化抢网
+    weatherAlertTimerId = setTimeout(run, 20_000)
+  }
+
+  async function pushDailyWeatherDigests() {
+    if (!weatherEnabled || !weatherStore.subscriptions.length) return
+    const today = formatDateTime(new Date()).slice(0, 10)
+    for (const sub of weatherStore.subscriptions) {
+      const wantDigest = sub.enableDailyDigest ?? enableWeatherDailyDigest
+      if (!wantDigest) continue
+      for (const arcadeId of sub.arcadeIds) {
+        const arcade = arcades[arcadeId]
+        if (!arcade || !isWeatherEnabledForArcade(arcade.config) || !hasWeatherRegion(arcade.config)) continue
+        if (!checkGroupWhitelist(arcadeId, sub.groupId)) continue
+        const key = `${sub.groupId}|${arcadeId}`
+        if (weatherStore.lastDailyDigestDates[key] === today) continue
+        let snap: WeatherSnapshot | null = null
+        try {
+          snap = await getArcadeWeather(arcade)
+        } catch (err) {
+          logDebug(`每日天气失败 ${arcadeId}: ${err}`)
+          continue
+        }
+        if (!snap) continue
+        let text = snap.digestText
+        if (snap.queryHint) text += `\n\n${snap.queryHint}`
+        const ok = await sendToGroup(sub, text)
+        if (ok) {
+          weatherStore.lastDailyDigestDates[key] = today
+          saveWeatherStore()
+          logDebug(`已推送每日天气 → 群 ${sub.groupId} / ${arcade.config.name}`)
+        }
+      }
+    }
+  }
+
+  function scheduleDailyWeatherDigest() {
+    if (!weatherEnabled) return
+    const scheduleNext = () => {
+      const now = new Date()
+      const next = new Date()
+      next.setHours(digestHour, 0, 0, 0)
+      if (now >= next) next.setDate(next.getDate() + 1)
+      const ms = next.getTime() - now.getTime()
+      weatherDigestTimerId = setTimeout(() => {
+        pushDailyWeatherDigests().catch(err => {
+          ctx.logger('mai-queue').error('每日天气推送失败:', err)
+        }).finally(() => scheduleNext())
+      }, ms)
+    }
+    scheduleNext()
+  }
+
+  scheduleWeatherAlertPoll()
+  scheduleDailyWeatherDigest()
+
   ctx.on('dispose', () => {
     if (resetTimerId) {
       clearTimeout(resetTimerId)
       resetTimerId = null
+    }
+    if (weatherAlertTimerId) {
+      clearTimeout(weatherAlertTimerId)
+      weatherAlertTimerId = null
+    }
+    if (weatherDigestTimerId) {
+      clearTimeout(weatherDigestTimerId)
+      weatherDigestTimerId = null
     }
   })
 }

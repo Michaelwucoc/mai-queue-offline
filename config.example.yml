@@ -8,6 +8,15 @@ plugins:
     nearcadeApiToken: ""
     nearcadeBaseUrl: "https://nearcade.cn"
     nearcadeBotName: "mai-queue"
+    # —— 天气预报（可选）——
+    enableWeather: true                 # 全局开启
+    weatherLookAheadHours: 4            # 查卡关注未来几小时
+    weatherCacheMinutes: 15
+    weatherAlertPollMinutes: 30         # 预警轮询间隔
+    enableWeatherDailyDigest: true      # 订阅群每日早间摘要
+    weatherDailyDigestHour: 10          # 默认 10:00
+    qweatherApiKey: ""                  # 可选：和风 Key，用于官方预警
+    qweatherApiHost: "devapi.qweather.com"
     debug: false
     arcades:
       wujiaochang:
@@ -19,6 +28,9 @@ plugins:
           groupWhitelist: ["123456789"]
           enableNearcade: false
           nearcadeId: 0
+          # 方式 A：经纬度（最准）
+          weatherLatitude: 31.298
+          weatherLongitude: 121.514
 
       youfang:
         config:
@@ -29,7 +41,10 @@ plugins:
           groupWhitelist: []
           enableNearcade: true
           nearcadeId: 16342
-          nearcadeTitleId: 1            # 控制台可选机种，默认舞萌 DX
+          nearcadeTitleId: 1
+          # 方式 B：城市 + 区（区可选；有区则优先区中心）
+          weatherCity: 上海
+          weatherDistrict: 嘉定
 
       liehuo:
         config:
@@ -38,8 +53,11 @@ plugins:
           machineCount: 8
           address: 上海市静安区江宁路77号恒顺大楼4层
           directionGuide: |
-            南京西路地铁站1号口步行430米
+            南京西路地铁站1口步行430米
           notice: 欢迎来到烈火！
           groupWhitelist: []
           enableNearcade: true
           nearcadeId: 10001
+          weatherCity: 上海
+          weatherDistrict: 静安
+          # enableWeather: false        # 可单独关闭某厅天气
